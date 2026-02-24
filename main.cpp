@@ -1,36 +1,60 @@
 #include "simple_ring_sdpa.hpp"
-#include "tt_metal/host_api.hpp"
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/constants.hpp>
 
 using namespace tt::tt_metal;
 
 int main(int argc, char** argv) {
-    // 0. 初始化设备
+    // 0. Init Device
     int device_id = 0;
-    Device* device = CreateDevice(device_id);
+    IDevice* device = CreateDevice(device_id);
 
-    // 1. 创建 Host Tensor (模拟数据)
-    // Shape: [Batch=1, Heads=1, SeqLen=32, HeadDim=32]
-    Shape shape({1, 1, 32, 32});
-    Tensor input_q = tt::tt_metal::create_device_tensor(shape, DataType::BFLOAT16, Layout::TILE, device);
-    Tensor input_k = tt::tt_metal::create_device_tensor(shape, DataType::BFLOAT16, Layout::TILE, device);
-    Tensor input_v = tt::tt_metal::create_device_tensor(shape, DataType::BFLOAT16, Layout::TILE, device);
+    // 1. Define Shapes
+    // Core Grid 2x2 = 4 cores
+    CoreCoord core_grid_size = {2, 2}; 
+    CoreRange core_range({0, 0}, {1, 1});
+    CoreRangeSet core_set({core_range});
+    uint32_t num_cores = 4;
+
+    // Per Core Chunk: SeqLen=128 (4 tiles), HeadDim=64 (2 tiles)
+    uint32_t seq_chunk_tiles = 4;
+    uint32_t head_dim_tiles = 2;
     
-    // Output tensor placeholder
-    Tensor output = tt::tt_metal::create_device_tensor(shape, DataType::BFLOAT16, Layout::TILE, device);
+    // Global Shape: [1, 1, SeqLen=128*4=512, HeadDim=64]
+    Shape global_shape({1, 1, 32 * seq_chunk_tiles * num_cores, 32 * head_dim_tiles});
 
-    // 2. 运行我们简化的 Ring SDPA
-    // 假设环大小为 4 (4个 Core 或 4个 Chip)
+    // 2. Create Tensors (Interleaved first, then Sharded)
+    // Allocating directly as Sharded is cleaner but requires ShardSpec
+    ShardSpec shard_spec(
+        core_set,
+        {seq_chunk_tiles * 32, head_dim_tiles * 32}, // Shard Shape in elements
+        ShardOrientation::ROW_MAJOR
+    );
+    
+    MemoryConfig shard_mem_config(
+			TensorMemoryLayout::HEIGHT_SHARDED, 
+			BufferType::L1,
+			shard_spec
+	);
+
+    // Placeholder: In a real app we'd load data from host here. 
+    // We create uninitialized sharded tensors for this demo.
+    Tensor Q = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
+    Tensor K = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
+    Tensor V = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
+    Tensor Output = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
+
+    // 3. Run Simplified Ring SDPA
     simple_sdpa::RunRingSDPA(
         device,
-        input_q,
-        input_k,
-        input_v,
-        output,
-        4, // ring_size
-        0  // my_ring_index (这里假设单机模拟，实际应该是多卡编排)
+        Q,
+        K,
+        V,
+        Output,
+        num_cores
     );
 
-    // 3. 关闭设备
+    // 4. Close Device
     CloseDevice(device);
     
     return 0;

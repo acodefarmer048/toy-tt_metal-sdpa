@@ -1,8 +1,11 @@
-#include "simple_ring_sdpa.hpp"
-#include "tt_metal/host_api.hpp"
-#include "tt_metal/common/constants.hpp"
+#include "simple_ring_sdpa.hpp"  
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/constants.hpp>
+#include <tt-metalium/distributed.hpp>
 
+using namespace tt;
 using namespace tt::tt_metal;
+using namespace distributed;
 
 namespace simple_sdpa {
 
@@ -12,13 +15,13 @@ void RunRingSDPA(
     Tensor& K,
     Tensor& V,
     Tensor& Output,
-    uint32_t ring_size,
-    uint32_t ring_index
+    uint32_t ring_size
 ) {
     Program program = CreateProgram();
 
     // 1. 计算核心网格 (Core Grid)
     // 简单起见，我们假设 input_tensor 的 shard spec 已经决定了网格大小
+    // For this example, we assume Q/K/V are pre-sharded appropriately
     auto core_grid = Q.shard_spec().value().grid;
     uint32_t num_cores = core_grid.num_cores();
 
@@ -48,6 +51,15 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_1, tile_size_bytes)
     );
 
+    // CB 2: V (Streaming Ring) Double Buffered
+    // V has the same shape as K usually (Seq, HeadDim) or (Seq, HeadDim_V)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(block_tiles * tile_size_bytes * 2, {{CBIndex::c_2, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_2, tile_size_bytes)
+    );
+
     // CB 24: Intermediate (存放 Q*K^T 的结果)
     // 结果大小是 St * St = 4 * 4 = 16 tiles
     CreateCircularBuffer(
@@ -57,72 +69,73 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_24, tile_size_bytes)
     );
 
-    // 3. 创建 Semaphores (同步信号量)
-    // 两个信号：一个用于接收(Receiver)，一个用于发送(Sender/Next Node)
-    // 初始值为 0
-    auto sem_addr = CreateSemaphore(program, core_grid, 0);
+    // CB 16: Output
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_16, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_16, tile_size_bytes)
+    );
+
+    // 3. (Simplified) Semaphores not strictly needed for DRAM-pull model
+    // but beneficial for future barrier synchronization.
+    // Leaving out to keep code minimal as per "simplified teaching version".
 
     // 4. 定义 Kernel
     // 4.1 Dataflow Kernel (Reader + Ring Communication)
-    // 这里我们把 Reader 和 Ring 搬运融合在一起，简化逻辑
-    std::vector<uint32_t> reader_args = {
-        (uint32_t)Q.buffer()->address(),
-        (uint32_t)K.buffer()->address(),
-        (uint32_t)sem_addr,
-        (uint32_t)ring_size,
-        (uint32_t)ring_index
-    };
-
+    // Args: Q_addr, K_addr, V_addr, Out_addr, RingSize, MyIndex
+    // We pass addresses as runtime args because they might change per core or run.
+    
+    // Compile-time args for Reader? None critical for this simplicity level.
     auto reader_kernel = CreateKernel(
         program,
-        "simple_ring_sdpa/kernels/dataflow_reader.cpp",
+        "kernels/dataflow_reader.cpp",
         core_grid,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
-    // 我们的 MatMul 计算 Q(St, DHt) * K(St, DHt)^T = Scores(St, St)
-    // 结果是 4x4=16 tiles。但是 DST 寄存器只有 8 tiles 容量。
-    // 所以必须把 K 切成两半来算：
-    // Subblock 1: Q(4,2) * K_sub1(2,2)^T -> Out(4,2) (8 tiles, OK!)
-    // Subblock 2: Q(4,2) * K_sub2(2,2)^T -> Out(4,2) (8 tiles, OK!)
-    // 这就是原项目中 "num_subblocks" 的由来。
-    
-    std::vector<uint32_t> compute_args = {
-        (uint32_t)ring_size,
-        (uint32_t)St,  // 4
-        (uint32_t)DHt, // 2
-        (uint32_t)2    // num_subblocks (K方向切几刀)
+            .noc = NOC::RISCV_1_default
+        }
     );
 
-    // 4.2 Compute Kernel (MatMul + Softmax)
-    std::vector<uint32_t> compute_args = {
+    // 4.2 Compute Kernel (MatMul + Softmax + MatMul)
+    // Compile args: RingSize, BlockTiles
+    std::vector<uint32_t> compute_compile_args = {
         (uint32_t)ring_size,
-        (uint32_t)block_size_tiles
+        (uint32_t)block_tiles
     };
 
     auto compute_kernel = CreateKernel(
         program,
-        "simple_ring_sdpa/kernels/compute_sdpa.cpp",
+        "kernels/compute_sdpa.cpp",
         core_grid,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi4,
-            .compile_args = compute_args
+            .compile_args = compute_compile_args
         }
     );
 
     // 5. 运行时参数 (Runtime Args)
-    // 对于更复杂的切分，这里需要给每个 Core 不同的 offset
-    // 简单起见，我们假设每个 Core 处理相同的逻辑（这在真实场景是不对的，仅作演示架构）
-    for (auto core : CoronalRange(core_grid)) {
-        // 设置 Reader 参数
-        SetRuntimeArgs(program, reader_kernel, core, {
-             // 可以在这里根据 core 坐标计算具体的 K 分片 offset
-             0, 0, 0 
-        });
-        
-        // 设置 Compute 参数
-        SetRuntimeArgs(program, compute_kernel, core, {
-            // Compute args...
-        });
+    // Iterate over cores and assign specific buffer addresses and indices
+    uint32_t logical_core_idx = 0;
+    for (const auto& core_range : core_grid.ranges()) {
+        for (auto y = core_range.start_coord.y; y <= core_range.end_coord.y; y++) {
+            for (auto x = core_range.start_coord.x; x <= core_range.end_coord.x; x++) {
+                CoreCoord core = {x, y};
+                
+                // Set Reader Args
+                // Args: Q_addr, K_addr, V_addr, Out_addr, NumCores, MyCoreIdx
+                SetRuntimeArgs(program, reader_kernel, core, {
+                    (uint32_t)Q.buffer()->address(),
+                    (uint32_t)K.buffer()->address(),
+                    (uint32_t)V.buffer()->address(),
+                    (uint32_t)Output.buffer()->address(),
+                    (uint32_t)num_cores,
+                    (uint32_t)logical_core_idx
+                });
+                
+                logical_core_idx++;
+            }
+        }
     }
 
     // 6. 执行

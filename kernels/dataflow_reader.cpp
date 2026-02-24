@@ -5,49 +5,81 @@ void kernel_main() {
     // 参数解析
     const uint32_t q_addr = get_arg_val<uint32_t>(0);
     const uint32_t k_addr = get_arg_val<uint32_t>(1);
-    const uint32_t sem_addr = get_arg_val<uint32_t>(2);
-    const uint32_t ring_size = get_arg_val<uint32_t>(3);
-    const uint32_t my_ring_index = get_arg_val<uint32_t>(4);
-
+    const uint32_t v_addr = get_arg_val<uint32_t>(2);
+    const uint32_t out_addr = get_arg_val<uint32_t>(3);
+    const uint32_t num_cores = get_arg_val<uint32_t>(4);
+    const uint32_t my_core_idx = get_arg_val<uint32_t>(5);
+    
+    // Constant args (could be compile time)
+    const uint32_t block_bytes = 2048 * 8; // Assuming specific block size for verification
+    const uint32_t num_blocks = 1;         // Total blocks to process
+    
     constexpr uint32_t cb_q = tt::CBIndex::c_0;
     constexpr uint32_t cb_k = tt::CBIndex::c_1;
-    
-    // 假设每个 block 的大小 (bytes)
-    const uint32_t block_bytes = 2048 * 8; 
-
-    // [新增] 计算下游节点 (Next Core) 的信号量地址 -- 这就是 Fused Op Signaler 的逻辑回归
-    // 简单假设 Ring 是按 x 坐标线性增加的
-    uint32_t next_core_x = (my_ring_index + 1) % ring_size; // 简化坐标映射
-    uint32_t next_core_y = 0;
-    uint64_t next_core_sem_noc_addr = get_noc_addr(next_core_x, next_core_y, sem_addr);
+    constexpr uint32_t cb_v = tt::CBIndex::c_2;
+    constexpr uint32_t cb_out = tt::CBIndex::c_16;
 
     // 1. 读取本地 Q (只需做一次)
-    uint64_t q_noc_addr = get_noc_addr(1, 0, q_addr); // 简化坐标计算
-    cb_reserve_back(cb_q, 8);
+    // Q is assumed to be resident or pre-loaded. Here we load one block.
+    // For simplicity, we assume strict sharding: Local Q is at q_addr + offset based on core?
+    // Correct approach: The host provides the specific address for this core's Q.
+    uint64_t q_noc_addr = get_noc_addr(1, 0, q_addr); // Simplified coordinate
+    
+    cb_reserve_back(cb_q, 1);
     uint32_t l1_write_addr_q = get_write_ptr(cb_q);
     noc_async_read(q_noc_addr, l1_write_addr_q, block_bytes);
     noc_async_read_barrier();
-    cb_push_back(cb_q, 8);
+    cb_push_back(cb_q, 1);
 
-    // 2. Ring Loop
-    for (uint32_t step = 0; step < ring_size; ++step) {
+    // 2. Ring Loop (Logical Ring)
+    // Instead of complex L1-to-L1, we iterate over the K/V blocks in the global sequence.
+    // Logical Ring: Core i processing Block i, then Block (i+1)%N, etc.
+    
+    for (uint32_t step = 0; step < num_cores; ++step) {
+        // Calculate which block of K/V we need
+        // My logical index for this step: (my_core_idx + step) % num_cores
+        // But for standard causal attention, usually we iterate 0..N.
+        // Let's stick to true "Ring" style: interacting with neighbors.
+        // Actually, simplest is:
+        // Step 0: Read K[my_idx], V[my_idx]
+        // Step 1: Read K[my_idx+1], V[my_idx+1] ...
         
-        // --- 同步逻辑 (The "Wait" you were looking for) ---
-        // 等待上游节点给我的信号 -> 或者是第一轮等待本地 DRAM
-        // 信号量的值随着 step 增加: 1, 2, 3...
-        noc_semaphore_wait_min((volatile tt_l1_ptr uint32_t*)sem_addr, step + 1);
+        uint32_t target_block_idx = (my_core_idx + step) % num_cores;
+        
+        // Calculate address for K and V
+        // Assuming linear layout in DRAM for simplicity of the example
+        // (BaseAddr + block_size * target_idx)
+        uint64_t k_noc_addr = get_noc_addr(1, 0, k_addr + target_block_idx * block_bytes);
+        uint64_t v_noc_addr = get_noc_addr(1, 0, v_addr + target_block_idx * block_bytes);
 
-        // --- 数据搬运 ---
-        // 计算这一轮的数据源在哪里
-        // 如果 step=0, 读本地 K
-        // 如果 step>0, 读上游 Core 的 buffer (这就是 Ring 的本质)
+        // Load K
+        cb_reserve_back(cb_k, 1);
+        uint32_t l1_write_addr_k = get_write_ptr(cb_k);
+        noc_async_read(k_noc_addr, l1_write_addr_k, block_bytes);
+        noc_async_read_barrier();
+        cb_push_back(cb_k, 1);
+
+        // Load V
+        cb_reserve_back(cb_v, 1);
+        uint32_t l1_write_addr_v = get_write_ptr(cb_v);
+        noc_async_read(v_noc_addr, l1_write_addr_v, block_bytes);
+        noc_async_read_barrier();
+        cb_push_back(cb_v, 1);
         
-        uint64_t source_noc_addr;
-        if (step == 0) {
-            source_noc_addr = get_noc_addr(1, 0, k_addr); // 本地 DRAM
-        } else {
-            // Ring 逻辑: 上一个 Core 的 L1 Buffer
-            // 这里为了简化，假设已经算好了上游 core 坐标
+        // Compute kernel will consume these and produce partial/final results
+        // For a true SDPA, we usually need to accumulate scores or outputs.
+        // Here we just feed data.
+    }
+    
+    // 3. Write Output
+    // Wait for the final result from compute
+    cb_wait_front(cb_out, 1);
+    uint32_t l1_read_addr_out = get_read_ptr(cb_out);
+    uint64_t out_noc_addr = get_noc_addr(1, 0, out_addr); 
+    noc_async_write(l1_read_addr_out, out_noc_addr, block_bytes);
+    noc_async_write_barrier();
+    cb_pop_front(cb_out, 1);
+}
             uint32_t prev_core_x = 0; // placeholder
             uint32_t prev_core_y = 0; // placeholder
             source_noc_addr = get_noc_addr(prev_core_x, prev_core_y, k_addr);
