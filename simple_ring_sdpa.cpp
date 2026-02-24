@@ -139,7 +139,8 @@ void RunRingSDPA(
     }
 
     // 6. 执行
-    EnqueueProgram(device->command_queue(), program, false);
+    // Use the member function of CommandQueue instead of the deprecated standalone function
+    device->command_queue().enqueue_program(program, false);
 }
 
 } // namespace simple_sdpa
