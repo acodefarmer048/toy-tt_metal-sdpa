@@ -1,8 +1,44 @@
 #include "simple_ring_sdpa.hpp"
+#include "tensor.hpp"
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/constants.hpp>
+#include <vector>
 
 using namespace tt::tt_metal;
+using simple_sdpa::Tensor;
+
+// Helper to create a sharded buffer and wrap it in a Tensor
+Tensor create_sharded_tensor(
+    IDevice* device, 
+    Shape shape, 
+    const ShardSpec& shard_spec
+) {
+    uint32_t total_elements = shape.volume();
+    uint32_t total_bytes = total_elements * 2; // BFLOAT16 size
+    uint32_t page_size = 32 * 32 * 2; // Tile size
+    
+    // Construct ShardSpecBuffer
+    // Use the constructor that takes ShardSpec directly
+    ShardSpecBuffer shard_params(
+        shard_spec,
+        {32, 32}, // page_shape
+        {shard_spec.shape[0] / 32, shard_spec.shape[1] / 32} // tensor2d_shape_in_pages
+    );
+    
+    // Use ShardedBufferConfig for sharded buffers
+    ShardedBufferConfig buf_config = {
+        .device = device,
+        .size = total_bytes,
+        .page_size = page_size,
+        .buffer_type = BufferType::L1,
+        .buffer_layout = TensorMemoryLayout::HEIGHT_SHARDED,
+        .shard_parameters = shard_params
+    };
+    
+    std::shared_ptr<Buffer> buffer = CreateBuffer(buf_config);
+    
+    return Tensor(buffer, shape, shard_spec);
+}
 
 int main(int argc, char** argv) {
     // 0. Init Device
@@ -11,7 +47,7 @@ int main(int argc, char** argv) {
 
     // 1. Define Shapes
     // Core Grid 2x2 = 4 cores
-    CoreCoord core_grid_size = {2, 2}; 
+    // CoreCoord core_grid_size = {2, 2}; // Unused
     CoreRange core_range({0, 0}, {1, 1});
     CoreRangeSet core_set({core_range});
     uint32_t num_cores = 4;
@@ -31,18 +67,11 @@ int main(int argc, char** argv) {
         ShardOrientation::ROW_MAJOR
     );
     
-    MemoryConfig shard_mem_config(
-			TensorMemoryLayout::HEIGHT_SHARDED, 
-			BufferType::L1,
-			shard_spec
-	);
-
-    // Placeholder: In a real app we'd load data from host here. 
-    // We create uninitialized sharded tensors for this demo.
-    Tensor Q = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
-    Tensor K = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
-    Tensor V = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
-    Tensor Output = create_device_tensor(global_shape, DataType::BFLOAT16, Layout::TILE, device, shard_mem_config);
+    // Use helper to create tensors
+    auto Q = create_sharded_tensor(device, global_shape, shard_spec);
+    auto K = create_sharded_tensor(device, global_shape, shard_spec);
+    auto V = create_sharded_tensor(device, global_shape, shard_spec);
+    auto Output = create_sharded_tensor(device, global_shape, shard_spec);
 
     // 3. Run Simplified Ring SDPA
     simple_sdpa::RunRingSDPA(
