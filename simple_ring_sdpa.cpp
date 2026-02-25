@@ -7,6 +7,9 @@ using namespace tt;
 using namespace tt::tt_metal;
 using namespace distributed;
 
+#ifndef OVERRIDE_KERNEL_PREFIX
+#define OVERRIDE_KERNEL_PREFIX ""
+#endif
 namespace simple_sdpa {
 
 void RunRingSDPA(
@@ -82,18 +85,24 @@ void RunRingSDPA(
     // Leaving out to keep code minimal as per "simplified teaching version".
 
     // 4. 定义 Kernel
-    // 4.1 Dataflow Kernel (Reader + Ring Communication)
-    // Args: Q_addr, K_addr, V_addr, Out_addr, RingSize, MyIndex
-    // We pass addresses as runtime args because they might change per core or run.
-    
-    // Compile-time args for Reader? None critical for this simplicity level.
+    // 4.1 Dataflow Kernels (Reader + Writer)
     auto reader_kernel = CreateKernel(
         program,
-        "kernels/dataflow_reader.cpp",
+        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow_reader.cpp",
         core_grid,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
             .noc = NOC::RISCV_1_default
+        }
+    );
+
+    auto writer_kernel = CreateKernel(
+        program,
+        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow_writer.cpp",
+        core_grid,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default
         }
     );
 
@@ -106,13 +115,15 @@ void RunRingSDPA(
 
     auto compute_kernel = CreateKernel(
         program,
-        "kernels/compute_sdpa.cpp",
+        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/compute_sdpa.cpp",
         core_grid,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi4,
             .compile_args = compute_compile_args
         }
     );
+    // Explicitly ignore unused variable warning
+    (void)compute_kernel;
 
     // 5. 运行时参数 (Runtime Args)
     // Iterate over cores and assign specific buffer addresses and indices
@@ -123,11 +134,19 @@ void RunRingSDPA(
                 CoreCoord core = {x, y};
                 
                 // Set Reader Args
-                // Args: Q_addr, K_addr, V_addr, Out_addr, NumCores, MyCoreIdx
+                // Args: Q_addr, K_addr, V_addr, Out_addr(unused), NumCores, MyCoreIdx
                 SetRuntimeArgs(program, reader_kernel, core, {
                     (uint32_t)Q.buffer()->address(),
                     (uint32_t)K.buffer()->address(),
                     (uint32_t)V.buffer()->address(),
+                    0, 
+                    (uint32_t)num_cores,
+                    (uint32_t)logical_core_idx
+                });
+                
+                // Set Writer Args
+                // Args: Out_addr, NumCores, MyCoreIdx
+                SetRuntimeArgs(program, writer_kernel, core, {
                     (uint32_t)Output.buffer()->address(),
                     (uint32_t)num_cores,
                     (uint32_t)logical_core_idx
