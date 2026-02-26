@@ -80,19 +80,46 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_16, tile_size_bytes)
     );
 
-    // 3. (Simplified) Semaphores not strictly needed for DRAM-pull model
-    // but beneficial for future barrier synchronization.
-    // Leaving out to keep code minimal as per "simplified teaching version".
-
+    // 3. Semaphores
+    // 我们需要信号量来同步 Ring 中的数据传输
+    // Sender (Writer) 需要知道 Receiver (Reader of next core) 什么时候读取完毕
+    // Receiver (Reader) 需要知道 Sender (Previous core) 什么时候写入完毕
+    // 但为了简化，我们采用 "Remote Pull" 模式，即 Reader 主动去上一个 Core 的 L1 读取数据
+    // 这需要 barrier 保证上一个 Core 的计算/数据准备已经完成。
+    
+    // 为了实现真正的 Ring (Semaphore synchronized)，我们需要两个信号量：
+    // 1. mcast_sender_semaphore: 表示本 Core 的数据已经准备好被读取 (Output Ready)
+    // 2. mcast_receiver_semaphore: 表示本 Core 已经读取完上一个 Core 的数据 (Input Done)
+    
+    // 简化版：我们只用 global barrier 或者简单的 semaphore 锁步。
+    // Let's stick to the simplest "Pull" model where we just wait for neighbors.
+    // Actually, explicit semaphores are better.
+    
+    uint32_t sender_sem_addr = CreateSemaphore(program, core_grid, 0);   // Initialized to 0
+    uint32_t receiver_sem_addr = CreateSemaphore(program, core_grid, 0); // Initialized to 0
+    
     // 4. 定义 Kernel
     // 4.1 Dataflow Kernels (Reader + Writer)
+    // Reader 将负责：
+    // 1. Step 0: 读取 Local DRAM -> Local CB
+    // 2. Signal "Ready" to Next Core
+    // 3. Wait for "Ready" from Prev Core
+    // 4. Step > 0: Pull from Prev Core L1 -> Local CB
+    // 5. Signal "Done" to Prev Core
+    
+    std::vector<uint32_t> reader_compile_args = {
+        (uint32_t)sender_sem_addr,
+        (uint32_t)receiver_sem_addr
+    };
+
     auto reader_kernel = CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow_reader.cpp",
+       OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow_reader.cpp",
         core_grid,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
-            .noc = NOC::RISCV_1_default
+            .noc = NOC::RISCV_1_default,
+            .compile_args = reader_compile_args
         }
     );
 
@@ -126,35 +153,62 @@ void RunRingSDPA(
     (void)compute_kernel;
 
     // 5. 运行时参数 (Runtime Args)
-    // Iterate over cores and assign specific buffer addresses and indices
-    uint32_t logical_core_idx = 0;
+    // First, collect all cores to handle ring neighbor logic
+    std::vector<CoreCoord> all_cores;
     for (const auto& core_range : core_grid.ranges()) {
         for (auto y = core_range.start_coord.y; y <= core_range.end_coord.y; y++) {
             for (auto x = core_range.start_coord.x; x <= core_range.end_coord.x; x++) {
-                CoreCoord core = {x, y};
-                
-                // Set Reader Args
-                // Args: Q_addr, K_addr, V_addr, Out_addr(unused), NumCores, MyCoreIdx
-                SetRuntimeArgs(program, reader_kernel, core, {
-                    (uint32_t)Q.buffer()->address(),
-                    (uint32_t)K.buffer()->address(),
-                    (uint32_t)V.buffer()->address(),
-                    0, 
-                    (uint32_t)num_cores,
-                    (uint32_t)logical_core_idx
-                });
-                
-                // Set Writer Args
-                // Args: Out_addr, NumCores, MyCoreIdx
-                SetRuntimeArgs(program, writer_kernel, core, {
-                    (uint32_t)Output.buffer()->address(),
-                    (uint32_t)num_cores,
-                    (uint32_t)logical_core_idx
-                });
-                
-                logical_core_idx++;
+                all_cores.push_back({x, y});
             }
         }
+    }
+    
+    // Iterate over cores and assign specific buffer addresses and indices
+    for (uint32_t i = 0; i < all_cores.size(); ++i) {
+        CoreCoord core = all_cores[i];
+        
+        // Calculate Previous Core (Ring Physical Coords)
+        uint32_t prev_core_idx = (i + num_cores - 1) % num_cores;
+        CoreCoord prev_core_logical = all_cores[prev_core_idx];
+        CoreCoord prev_core_physical = device->worker_core_from_logical_core(prev_core_logical);
+        
+        // Arguments for Reader:
+        // 0: Q_addr (local shard from Buffer)
+        // 1: K_addr (local shard from Buffer)
+        // 2: V_addr (local shard from Buffer)
+        // 3: Unused (Output Addr for pure reader?)
+        // 4: Num Cores (Ring Size)
+        // 5: Logical Core Index
+        // 6: Prev Core Physical X
+        // 7: Prev Core Physical Y
+        
+        // Note: For simplified ring, we simulate pulling from logical address or physical?
+        // If we pull from prev core's L1, need physical coords.
+        // Also need addresses of buffers? Buffers are sharded, so each core has its own shard at same local address (L1).
+        // The `Q.buffer()->address()` gives the base address of the buffer. 
+        // For Sharded Buffer, address is same on all cores usually (L1 offset).
+        
+        uint32_t buffer_addr_q = Q.buffer()->address();
+        uint32_t buffer_addr_k = K.buffer()->address();
+        uint32_t buffer_addr_v = V.buffer()->address();
+        
+        SetRuntimeArgs(program, reader_kernel, core, {
+            buffer_addr_q,
+            buffer_addr_k,
+            buffer_addr_v,
+            0, // Unused
+            (uint32_t)num_cores,
+            (uint32_t)i, // Logical Core Index
+            (uint32_t)prev_core_physical.x,
+            (uint32_t)prev_core_physical.y
+        });
+        
+        // Set Writer Args
+        SetRuntimeArgs(program, writer_kernel, core, {
+            (uint32_t)Output.buffer()->address(),
+            (uint32_t)num_cores,
+            (uint32_t)i
+        });
     }
 
     // 6. 执行
