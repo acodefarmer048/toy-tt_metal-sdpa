@@ -71,6 +71,36 @@ void RunRingSDPA(
         CircularBufferConfig(St * St * tile_size_bytes, {{CBIndex::c_24, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_24, tile_size_bytes)
     );
+    // CB 25: Sum (St * 1 tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_25, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_25, tile_size_bytes)
+    );
+
+    // CB 26: Max (St * 1 tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_26, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_26, tile_size_bytes)
+    );
+    // CB 25: Sum (St * 1 tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_25, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_25, tile_size_bytes)
+    );
+
+    // CB 26: Max (St * 1 tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_26, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_26, tile_size_bytes)
+    );
 
     // CB 16: Output
     CreateCircularBuffer(
