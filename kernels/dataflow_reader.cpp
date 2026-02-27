@@ -8,9 +8,10 @@ void kernel_main() {
     uint32_t v_addr = get_arg_val<uint32_t>(2);
     // uint32_t unused = get_arg_val<uint32_t>(3);
     uint32_t num_cores = get_arg_val<uint32_t>(4);
-    uint32_t my_core_idx = get_arg_val<uint32_t>(5);
-    uint32_t prev_core_x = get_arg_val<uint32_t>(6);
-    uint32_t prev_core_y = get_arg_val<uint32_t>(7);
+    uint32_t my_x = get_arg_val<uint32_t>(5);
+    uint32_t my_y = get_arg_val<uint32_t>(6);
+    uint32_t prev_core_x = get_arg_val<uint32_t>(7);
+    uint32_t prev_core_y = get_arg_val<uint32_t>(8);
 
     // Compile time args
     constexpr uint32_t sender_sem_addr = get_compile_time_arg_val(0);
@@ -26,11 +27,9 @@ void kernel_main() {
     constexpr uint32_t block_bytes = 16384; 
     constexpr uint32_t num_tiles = 8;
     
-    // My Coords
-    uint32_t my_x = my_x_index();
-    uint32_t my_y = my_y_index();
     
     // NOC Addresses for Local Slots (Loopback)
+    uint64_t my_q_slot_noc = get_noc_addr(my_x, my_y, q_addr);
     uint64_t my_k_slot_noc = get_noc_addr(my_x, my_y, k_addr);
     uint64_t my_v_slot_noc = get_noc_addr(my_x, my_y, v_addr);
     uint64_t my_sender_sem_noc = get_noc_addr(my_x, my_y, sender_sem_addr);
@@ -42,7 +41,7 @@ void kernel_main() {
     // Load Q
     cb_reserve_back(cb_q, num_tiles);
     uint32_t wr_ptr_q = get_write_ptr(cb_q);
-    noc_async_read(get_noc_addr(my_x, my_y, q_addr), wr_ptr_q, block_bytes);
+    noc_async_read(my_q_slot_noc, wr_ptr_q, block_bytes);
     noc_async_read_barrier();
     cb_push_back(cb_q, num_tiles);
 

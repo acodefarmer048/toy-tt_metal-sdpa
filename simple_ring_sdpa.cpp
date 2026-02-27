@@ -86,21 +86,6 @@ void RunRingSDPA(
         CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_26, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_26, tile_size_bytes)
     );
-    // CB 25: Sum (St * 1 tiles)
-    CreateCircularBuffer(
-        program,
-        core_grid,
-        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_25, DataFormat::Float16_b}})
-            .set_page_size(CBIndex::c_25, tile_size_bytes)
-    );
-
-    // CB 26: Max (St * 1 tiles)
-    CreateCircularBuffer(
-        program,
-        core_grid,
-        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_26, DataFormat::Float16_b}})
-            .set_page_size(CBIndex::c_26, tile_size_bytes)
-    );
 
     // CB 16: Output
     CreateCircularBuffer(
@@ -201,6 +186,7 @@ void RunRingSDPA(
         uint32_t prev_core_idx = (i + num_cores - 1) % num_cores;
         CoreCoord prev_core_logical = all_cores[prev_core_idx];
         CoreCoord prev_core_physical = device->worker_core_from_logical_core(prev_core_logical);
+        CoreCoord current_core_physical = device->worker_core_from_logical_core(core);
         
         // Arguments for Reader:
         // 0: Q_addr (local shard from Buffer)
@@ -228,7 +214,8 @@ void RunRingSDPA(
             buffer_addr_v,
             0, // Unused
             (uint32_t)num_cores,
-            (uint32_t)i, // Logical Core Index
+            (uint32_t)current_core_physical.x,
+            (uint32_t)current_core_physical.y, 
             (uint32_t)prev_core_physical.x,
             (uint32_t)prev_core_physical.y
         });
