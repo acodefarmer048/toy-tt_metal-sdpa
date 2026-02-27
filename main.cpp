@@ -74,6 +74,9 @@ int main(int argc, char** argv) {
     auto Output = create_sharded_tensor(device, global_shape, shard_spec);
 
     // 3. Run Simplified Ring SDPA
+    std::cout << "Starting Ring SDPA..." << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
+    
     simple_sdpa::RunRingSDPA(
         device,
         Q,
@@ -82,6 +85,10 @@ int main(int argc, char** argv) {
         Output,
         num_cores
     );
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << "Ring SDPA Completed in " << elapsed.count() << " seconds." << std::endl;
 
     // 4. Close Device
     CloseDevice(device);

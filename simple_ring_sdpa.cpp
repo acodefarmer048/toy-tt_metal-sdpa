@@ -2,10 +2,10 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/distributed.hpp>
+#include <tt-metalium/bfloat16.hpp>
 
 using namespace tt;
 using namespace tt::tt_metal;
-using namespace distributed;
 
 #ifndef OVERRIDE_KERNEL_PREFIX
 #define OVERRIDE_KERNEL_PREFIX ""
@@ -93,6 +93,73 @@ void RunRingSDPA(
         core_grid,
         CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_16, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_16, tile_size_bytes)
+    );
+
+    // CB 3: Scaler (1.0f) - For Reduce operations
+    // Create a sharded buffer (1 tile per core) initialized with 1.0f
+    // Total size = num_cores * 1 tile
+    // 1. Create Data
+    std::vector<bfloat16> scaler_data_host(32 * 32, bfloat16(1.0f));
+    std::vector<uint32_t> packed_scaler_data = pack_bfloat16_vec_into_uint32_vec(scaler_data_host);
+    
+    // 2. Create Sharded Buffer
+    ShardSpec scaler_shard_spec(
+        core_grid, 
+        {32, 32}, 
+        ShardOrientation::ROW_MAJOR
+    );
+    
+    uint32_t scaler_total_size = num_cores * tile_size_bytes; // 1 tile per core
+    
+    // Config: Height Sharded usually
+    // Page Size = 1 tile
+    // Total Size = num_cores * tile size
+    // Buffer Type = L1
+    
+    // Use Interleaved buffer wrapper logic or CreateBuffer directly
+    // For simplicity, we create a sharded buffer manually
+    ShardedBufferConfig scaler_buf_config = {
+                .device = device,
+                .size = scaler_total_size,
+                .page_size = tile_size_bytes,
+                .buffer_type = BufferType::L1,
+                .buffer_layout = TensorMemoryLayout::HEIGHT_SHARDED,
+                .shard_parameters = ShardSpecBuffer(
+                        scaler_shard_spec,
+                        {32, 32},
+                        {1, 1}
+                )
+    };
+    
+    std::shared_ptr<Buffer> scaler_buffer = CreateBuffer(scaler_buf_config);
+    
+    // 3. Write Data (Broadcast to all shards or write sequentially?)
+    // WriteToBuffer handles sharding automatically if data is ordered correctly.
+    // We want the SAME data on all cores. So we need to replicate the data num_cores times in the host buffer
+    // or rely on a broadcast mechanism. EnqueueWriteBuffer expects full buffer size.
+    std::vector<uint32_t> full_scaler_data;
+    full_scaler_data.reserve(packed_scaler_data.size() * num_cores);
+    for(uint32_t i=0; i<num_cores; ++i) {
+        full_scaler_data.insert(full_scaler_data.end(), packed_scaler_data.begin(), packed_scaler_data.end());
+    }
+    
+    // detail::WriteToBuffer(scaler_buffer, full_scaler_data);
+    EnqueueWriteBuffer(device->command_queue(), scaler_buffer, full_scaler_data, true);
+    
+    // 4. Create CB using this globally allocated buffer
+    // Each core will access its local shard naturally because it's height sharded and we use CreateCircularBuffer on the grid
+    // Wait, CreateCircularBuffer with globally_allocated_address usually points to the base address.
+    // If it's a Sharded Buffer, does CB config handle the offset?
+    // Yes, if we pass the buffer object, it should.
+    // CircularBufferConfig constructor taking buffer:
+    // It automatically sets the address to the local shard address for each core.
+    
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(tile_size_bytes, {{CBIndex::c_3, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_3, tile_size_bytes)
+            .set_globally_allocated_address(*scaler_buffer)
     );
 
     // 3. Semaphores

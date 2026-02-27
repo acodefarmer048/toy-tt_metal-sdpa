@@ -37,6 +37,9 @@ void MAIN {
     mm_init(cb_q, cb_k, cb_interm);
     exp_tile_init();
     add_tiles_init(cb_out, cb_interm);
+    
+    // Scaler CB for Reduce
+    constexpr uint32_t cb_scaler = tt::CBIndex::c_3;
 
     // Loop over ring steps
     for (uint32_t step = 0; step < ring_size; ++step) {
@@ -46,62 +49,72 @@ void MAIN {
 
         // 2. MatMul Q * K^T -> Scores (Interm)
         mm_init(cb_q, cb_k, cb_interm);
-        // Assuming block_tiles handles the QxK dim correctly
-        matmul_tiles(cb_q, cb_k, 0, block_tiles, 0, true); 
+        matmul_tiles(cb_q, cb_k, 0, 16, 0, true); 
+        for(uint32_t i=0; i<16; ++i) pack_tile(i, cb_interm);
+        cb_wait_front(cb_interm, 16);
+
+        // 3. Online Softmax Logic
         
-        // Wait for scores to be available in Interm
-        // Note: matmul_tiles writes to DST. We pack to Interm.
-        // Assuming St=4, result is 4*4=16 tiles.
-        // We pack all tiles.
+        // 3.1 Compute Local Max (per row)
+        // Reduce each tile to a col-vector of maxes
+        reduce_init<ReduceFunc::MAX, ReduceDim::REDUCE_ROW>(cb_interm, cb_scaler, cb_max);
+        for(uint32_t i=0; i<16; ++i) { 
+             reduce_tile<ReduceFunc::MAX, ReduceDim::REDUCE_ROW>(cb_interm, cb_scaler, i, 0, i); 
+             pack_tile(i, cb_max);
+        }
+        cb_wait_front(cb_max, 16);
+        
+        // 3.2 Exp(Score - Max)
+        // Subtract max from scores
+        sub_bcast_cols_init_short(cb_interm, cb_max);
         for(uint32_t i=0; i<16; ++i) {
+             sub_tiles_bcast_cols(cb_interm, cb_max, i, i, i); // Subtract respective max tile
              pack_tile(i, cb_interm);
         }
         
-        cb_wait_front(cb_interm, 16);
-
-        // 3. Exp(Scores)
-        copy_tile(cb_interm, 0, 0); 
-        exp_tile(0);                
-        pack_tile(0, cb_interm);    
-        cb_pop_front(cb_interm, 16);
-        cb_push_back(cb_interm, 16);
-        cb_wait_front(cb_interm, 16);
-
+        // Exp
+        exp_tile_init();
+        for(uint32_t i=0; i<16; ++i) {
+             copy_tile(cb_interm, i, i);
+             exp_tile(i);
+             pack_tile(i, cb_interm);
+        }
+        
+        // 3.3 Sum(Prob)
+        reduce_init<ReduceFunc::SUM, ReduceDim::REDUCE_ROW>(cb_interm, cb_scaler, cb_sum);
+        for(uint32_t i=0; i<16; ++i) {
+             reduce_tile<ReduceFunc::SUM, ReduceDim::REDUCE_ROW>(cb_interm, cb_scaler, i, 0, i);
+             pack_tile(i, cb_sum);
+        }
+        cb_wait_front(cb_sum, 16);
+        
         // 4. MatMul Prob * V -> StepOutput
-        mm_init(cb_interm, cb_v, cb_out);
+        mm_init(cb_interm, cb_v, cb_interm); 
         matmul_tiles(cb_interm, cb_v, 0, 16, 0, false);
+        for(uint32_t i=0; i<8; ++i) pack_tile(i, cb_interm);
         
-        // Pack result to Temp (Reuse Interm or Pack directly to CB_out logic)
-        // With limited CBs, let's pack to Interm again as temp buffer for accumulation
-        for(uint32_t i=0; i<8; ++i) { 
-             pack_tile(i, cb_interm);
-        }
-        cb_pop_front(cb_interm, 16); // Free Exp(Scores)
-        cb_push_back(cb_interm, 8);  // Commit StepOutput
-        cb_wait_front(cb_interm, 8); // Wait for StepOutput
-        
-        // 5. Accumulate
+        // 5. Accumulate Output (Unnormalized)
         if (step > 0) {
              cb_wait_front(cb_out, 8); // Prev Output
-             
-             // Add StepOutput (Interm) + PrevOutput (cb_out)
+             add_tiles_init(cb_out, cb_interm);
              for(uint32_t i=0; i<8; ++i) {
-                 add_tiles(cb_interm, cb_out, i, i, i); // Add tile i
-                 pack_tile(i, cb_out); // Overwrite cb_out
+                 add_tiles(cb_interm, cb_out, i, i, i);
+                 pack_tile(i, cb_out);
              }
-             
-             cb_pop_front(cb_out, 8); // Done with old
-             cb_pop_front(cb_interm, 8); // Done with temp
+             cb_pop_front(cb_out, 8);
         } else {
-             // Step 0: Just copy/pack StepOutput to cb_out
              for(uint32_t i=0; i<8; ++i) {
                  copy_tile(cb_interm, i, i);
                  pack_tile(i, cb_out);
              }
-             cb_pop_front(cb_interm, 8);
         }
         
         cb_push_back(cb_out, 8);
+        
+        // Cleanup Loop Temps
+        cb_pop_front(cb_interm, 16); // Prob
+        cb_pop_front(cb_max, 16);    // Max
+        cb_pop_front(cb_sum, 16);    // Sum
         
         // Cleanup Input
         cb_pop_front(cb_k, block_tiles);
