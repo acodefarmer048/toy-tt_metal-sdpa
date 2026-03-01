@@ -4,7 +4,6 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/bfloat16.hpp>
 #include <tt-metalium/command_queue.hpp>
-#include <tt-metalium/command_queue.hpp>
 
 using namespace tt;
 using namespace tt::tt_metal;
