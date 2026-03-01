@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "dataflow_api.h"
+#include "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/generate_reduce_scaler.hpp"
 
 void kernel_main() {
     // 1. Args
@@ -16,6 +17,11 @@ void kernel_main() {
     // Compile time args
     constexpr uint32_t sender_sem_addr = get_compile_time_arg_val(0);
     constexpr uint32_t receiver_sem_addr = get_compile_time_arg_val(1);
+    constexpr uint32_t packed_scaler_val = get_compile_time_arg_val(2);
+
+    // Generate Scaler
+    constexpr uint32_t cb_scaler = tt::CBIndex::c_3;
+    generate_reduce_scaler(cb_scaler, packed_scaler_val);
 
     // CB Allocations
     constexpr uint32_t cb_q = tt::CBIndex::c_0;

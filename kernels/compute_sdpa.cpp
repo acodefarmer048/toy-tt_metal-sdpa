@@ -41,6 +41,9 @@ void MAIN {
     // Scaler CB for Reduce
     constexpr uint32_t cb_scaler = tt::CBIndex::c_3;
 
+    // Wait for the single scalar tile to be populated by the reader
+    cb_wait_front(cb_scaler, 1);
+
     // Loop over ring steps
     for (uint32_t step = 0; step < ring_size; ++step) {
         // 1. Wait for K and V
