@@ -200,8 +200,8 @@ void RunRingSDPA(
         // Calculate Previous Core (Ring Physical Coords)
         uint32_t prev_core_idx = (i + num_cores - 1) % num_cores;
         CoreCoord prev_core_logical = all_cores[prev_core_idx];
-        CoreCoord prev_core_physical = device->worker_core_from_logical_core(prev_core_logical);
         CoreCoord current_core_physical = device->worker_core_from_logical_core(core);
+        CoreCoord prev_core_physical = device->worker_core_from_logical_core(prev_core_logical);
         
         // Arguments for Reader:
         // 0: Q_addr (local shard from Buffer)

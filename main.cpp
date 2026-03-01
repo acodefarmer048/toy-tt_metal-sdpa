@@ -111,7 +111,7 @@ std::shared_ptr<Buffer> create_and_init_sharded_buffer(
     // Usually enqueue_write_buffer handles it if the buffer is configured correctly.
     // However, for HEIGHT_SHARDED, the data buffer on host is expected to be contiguous logical or sharded?
     // enqueue_write_buffer expects contiguous data usually and handles the sharding copy.
-    device->command_queue().enqueue_write_buffer(*buffer, packed_data.data(), true); 
+    device->command_queue().enqueue_write_buffer(*buffer, packed_data.data(), BufferRegion(0, total_bytes), true); 
     
     return buffer;
 }
@@ -224,8 +224,9 @@ int main(int argc, char** argv) {
     // Buffer size is total_bytes
     // We allocate a vector of uint32_t to hold bfloat16 packed pairs
     std::vector<uint32_t> output_packed(total_elements / 2); // 2 bf16 per uint32
+    uint32_t output_size_bytes = total_elements * 2;
     // Use proper API
-    device->command_queue().enqueue_read_buffer(*Out_buf, output_packed.data(), true);
+    device->command_queue().enqueue_read_buffer(*Out_buf, output_packed.data(), BufferRegion(0, output_size_bytes), true);
     
     std::vector<float> output_device = unpack_uint32_to_float(output_packed);
     
