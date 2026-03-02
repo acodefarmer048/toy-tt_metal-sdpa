@@ -4,6 +4,7 @@
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/command_queue.hpp>
 #include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/distributed.hpp>
 #include <vector>
 #include <random>
 #include <cmath>
@@ -82,66 +83,99 @@ std::vector<float> cpu_sdpa(
     return output;
 }
 
-// Helper to create a SHARDED buffer and wrap it in a Tensor
+// Helper to create an INTERLEAVED buffer on Mesh Device (replicated locally)
 // Also initializes it with data
-std::shared_ptr<Buffer> create_and_init_sharded_buffer(
-    IDevice* device, 
+std::shared_ptr<distributed::MeshBuffer> create_and_init_mesh_buffer(
+    distributed::MeshDevice* mesh_device,
     uint32_t total_elements,
     uint32_t page_size,
-    const ShardSpecBuffer& shard_params,
     const std::vector<float>& initial_data
 ) {
     uint32_t total_bytes = total_elements * 2; // BFLOAT16 size
     
-    // Construct ShardedBufferConfig
-    ShardedBufferConfig buf_config = {
-        .device = device,
-        .size = total_bytes,
+    // DRAM Config (Local to each device)
+    distributed::DeviceLocalBufferConfig dram_config{
         .page_size = page_size,
-        .buffer_type = BufferType::L1,
-        .buffer_layout = TensorMemoryLayout::HEIGHT_SHARDED,
-        .shard_parameters = shard_params
+        .buffer_type = BufferType::DRAM
     };
+
+    // Replicated Config (Size of buffer per device)
+    distributed::ReplicatedBufferConfig buffer_config{
+        .size = total_bytes
+    };
+
+    auto mesh_buffer = distributed::MeshBuffer::create(buffer_config, dram_config, mesh_device);
     
-    std::shared_ptr<Buffer> buffer = CreateBuffer(buf_config);
-    
-    // Write Data
+    // Write Data (Pack first)
     std::vector<uint32_t> packed_data = pack_float_to_uint32(initial_data);
-    // Write sharded buffer must respect sharding. 
-    // Usually enqueue_write_buffer handles it if the buffer is configured correctly.
-    // However, for HEIGHT_SHARDED, the data buffer on host is expected to be contiguous logical or sharded?
-    // enqueue_write_buffer expects contiguous data usually and handles the sharding copy.
-    device->command_queue().enqueue_write_buffer(*buffer, packed_data.data(), BufferRegion(0, total_bytes), true); 
     
-    return buffer;
+    // Use Mesh Command Queue to write
+    distributed::EnqueueWriteMeshBuffer(mesh_device->mesh_command_queue(), mesh_buffer, packed_data, false);
+    
+    return mesh_buffer;
 }
 
-
 int main(int argc, char** argv) {
-    // 0. Init Device
+    // 0. Init Device (Mesh Device: Unit Mesh)
     int device_id = 0;
-    IDevice* device = CreateDevice(device_id);
+    std::shared_ptr<distributed::MeshDevice> mesh_device = distributed::MeshDevice::create_unit_mesh(device_id);
+    
+    // Get Local Device (needed for single device APIs passed to RunRingSDPA)
+    // For unit mesh, there is only 1 device.
+    IDevice* device = mesh_device->get_device(mesh_device->get_device_ids()[0]);
 
-    // 1. Define Shapes
-    // Core Grid 2x2 = 4 cores
-    CoreRange core_range({0, 0}, {1, 1}); // Using 4 cores: (0,0), (0,1), (1,0), (1,1) if grid is 2x2.
-    // Wait, let's use a simple 1x2 or 2x2 grid. The range {0,0} to {1,1} covers 4 cores.
+    // 1. Define Shapes based on Device Grid
+    // Get the logical compute grid size
+    CoreCoord grid_size = device->compute_with_storage_grid_size();
+    
+    uint32_t num_rows = grid_size.y; // Heads = Number of Rows
+    uint32_t num_cols = grid_size.x; // Ring Size = Number of Cols
+    
+    std::cout << "Using Device Grid: " << num_rows << " Rows (Heads) x " << num_cols << " Cols (Ring Size)" << std::endl;
+
+    // Iterate over the grid and print core types for debugging
+    std::cout << "Checking Core Types in the grid:" << std::endl;
+    for(uint32_t y = 0; y < num_rows; ++y) {
+        for(uint32_t x = 0; x < num_cols; ++x) {
+            CoreCoord logical_core = {x, y};
+            // Note: In newer Metaliums, core_type might not be directly queryable from logical core on Device without conversion
+            // But we can check if it is a worker core.
+            // Using low-level check if available, or just printing coordinate.
+            // Actually, we can get physical core and check via allocator or similar?
+            // Simplified: Just print the coordinate we are trying to use.
+            CoreCoord phys_core = device->worker_core_from_logical_core(logical_core);
+            std::cout << "Logical: (" << x << "," << y << ") -> Physical: " << phys_core.str() << std::endl;
+        }
+    }
+
+    // Core Grid corresponding to Full Device
+    CoreRange core_range({0, 0}, {num_cols - 1, num_rows - 1});
     CoreRangeSet core_set({core_range});
-    uint32_t num_cores = 4;
+    
+    uint32_t num_cores = num_rows * num_cols;
+    
+    uint32_t batch = 1;
+    uint32_t num_heads = num_rows;   // One head per row
+    uint32_t head_dim_tiles = 2;     // 64 (32*2)
+    uint32_t tile_size = 32;
 
     // Per Core Chunk: SeqLen=128 (4 tiles), HeadDim=64 (2 tiles)
-    uint32_t seq_chunk_tiles = 4;
-    uint32_t head_dim_tiles = 2;
-    uint32_t tile_size = 32;
+    uint32_t seq_chunk_tiles = 4; // S_core / 32
     
     uint32_t seq_len_per_core = seq_chunk_tiles * tile_size; // 128
-    uint32_t head_dim = head_dim_tiles * tile_size; // 64
-    uint32_t total_seq_len = seq_len_per_core * num_cores; // 512
+    uint32_t head_dim = head_dim_tiles * tile_size;          // 64
+    uint32_t total_seq_len = seq_len_per_core * num_cols;    // Seq Len scales with Ring Size
     
-    uint32_t total_elements = total_seq_len * head_dim;
+    uint32_t total_elements = batch * num_heads * total_seq_len * head_dim;
     
-    // Global Shape: [1, 1, 512, 64]
-    Shape global_shape({1, 1, total_seq_len, head_dim});
+    std::cout << "Problem Config:" << std::endl;
+    std::cout << "  Batch: " << batch << std::endl;
+    std::cout << "  Heads: " << num_heads << std::endl;
+    std::cout << "  SeqLen: " << total_seq_len << " (" << seq_len_per_core << " per core)" << std::endl;
+    std::cout << "  HeadDim: " << head_dim << std::endl;
+    
+    // Global Shape: [1, NumHeads, SeqLen, HeadDim]
+    Shape global_shape({batch, num_heads, total_seq_len, head_dim});
     
     // 2. Prepare Host Data
     std::cout << "Preparing Input Data..." << std::endl;
@@ -159,46 +193,37 @@ int main(int argc, char** argv) {
     }
     
     // 3. Create Device Buffers and Write Data
-    std::cout << "Creating Device Buffers..." << std::endl;
+    std::cout << "Creating Device Buffers (Interleaved)..." << std::endl;
     ShardSpec shard_spec(
         core_set,
-        {seq_len_per_core, head_dim}, // Shard Shape in elements (128x64) per core
-        ShardOrientation::ROW_MAJOR
+        {seq_len_per_core, head_dim}
     );
+    // Note: Orientation is implicitly RowMajor in some constructors or we assume default.
+    // If explicit orientation needed: ShardSpec(core_set, {h, w}, ShardOrientation::ROW_MAJOR)
     
-    ShardSpecBuffer shard_params(
-        shard_spec,
-        {tile_size, tile_size}, // page_shape
-        {seq_len_per_core / tile_size, head_dim / tile_size} // tensor2d_shape_in_pages (4x2)
-    );
+    // Page size for Interleaved (Tile size)
+    uint32_t page_size = 32 * 32 * 2; // 2048 bytes
     
-    uint32_t page_size = tile_size * tile_size * 2; // In Bytes for one tile
-    // Actually for Height Sharded, page_size usually refers to the size of one "page" which is often 1 tile?
-    // Or is it the full shard size if page_size is not specified?
-    // In CreateBuffer earlier checks for SDPA usually imply tile-based pages.
-    
-    auto Q_buf = create_and_init_sharded_buffer(device, total_elements, page_size, shard_params, Q_host);
-    auto K_buf = create_and_init_sharded_buffer(device, total_elements, page_size, shard_params, K_host);
-    auto V_buf = create_and_init_sharded_buffer(device, total_elements, page_size, shard_params, V_host);
+    auto Q_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, Q_host);
+    auto K_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, K_host);
+    auto V_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, V_host);
     
     // Output Buffer (Empty)
     std::vector<float> zeros(total_elements, 0.0f);
-    auto Out_buf = create_and_init_sharded_buffer(device, total_elements, page_size, shard_params, zeros);
+    auto Out_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, zeros);
+
+    // Extract Local Buffers from MeshBuffers
+    // Use the aliasing constructor of shared_ptr to avoid double-freeing the buffer.
+    // The shared_ptr shares ownership of Q_mesh_buf (keeping it alive), but points to the specific device buffer.
+    auto Q_buf = std::shared_ptr<Buffer>(Q_mesh_buf, Q_mesh_buf->get_backing_buffer());
+    auto K_buf = std::shared_ptr<Buffer>(K_mesh_buf, K_mesh_buf->get_backing_buffer());
+    auto V_buf = std::shared_ptr<Buffer>(V_mesh_buf, V_mesh_buf->get_backing_buffer());
+    auto Out_buf = std::shared_ptr<Buffer>(Out_mesh_buf, Out_mesh_buf->get_backing_buffer());
 
     // 4. Run Simplified Ring SDPA
     std::cout << "Starting Ring SDPA..." << std::endl;
-    // Need simpler wrapper or just pass plain buffer? 
-    // simple_sdpa::RunRingSDPA expects simple_sdpa::Tensor wrapper from header
-    // Let's create wrappers.
-    // Assuming simple_ring_sdpa.hpp defines struct Tensor { std::shared_ptr<Buffer> buffer; ... }
     
-    // We need to match the struct definition in simple_ring_sdpa.hpp.
-    // Since we included "simple_ring_sdpa.hpp", we can use `simple_sdpa::Tensor`.
-    
-    // However, I don't see the definition of Tensor in previous `read_file` output of this file (it was using simple_sdpa::Tensor).
-    // Let's assume it has a constructor compatible or we can construct it.
-    // Based on previous code: `Tensor(buffer, shape, shard_spec)`
-    
+    // We pass the DRAM buffer but attach the ShardSpec so the SDPA function knows the grid
     simple_sdpa::Tensor Q_tensor(Q_buf, global_shape, shard_spec);
     simple_sdpa::Tensor K_tensor(K_buf, global_shape, shard_spec);
     simple_sdpa::Tensor V_tensor(V_buf, global_shape, shard_spec);
@@ -219,20 +244,37 @@ int main(int argc, char** argv) {
     std::chrono::duration<double> elapsed = end - start;
     std::cout << "Ring SDPA Completed in " << elapsed.count() << " seconds." << std::endl;
 
-    // 5. Read Output
+    // 5. Read Output using Mesh API
     std::cout << "Reading Output..." << std::endl;
     // Buffer size is total_bytes
     // We allocate a vector of uint32_t to hold bfloat16 packed pairs
     std::vector<uint32_t> output_packed(total_elements / 2); // 2 bf16 per uint32
-    uint32_t output_size_bytes = total_elements * 2;
-    // Use proper API
-    device->command_queue().enqueue_read_buffer(*Out_buf, output_packed.data(), BufferRegion(0, output_size_bytes), true);
+    
+    // Use Mesh Read
+    distributed::EnqueueReadMeshBuffer(mesh_device->mesh_command_queue(), output_packed, Out_mesh_buf, true);
     
     std::vector<float> output_device = unpack_uint32_to_float(output_packed);
     
-    // 6. Run Reference CPU
+    // 6. Run Reference CPU (Multi-Head)
     std::cout << "Running Reference CPU SDPA..." << std::endl;
-    std::vector<float> output_cpu = cpu_sdpa(Q_host, K_host, V_host, total_seq_len, head_dim);
+    std::vector<float> output_cpu(total_elements); // Destination
+    uint32_t stride = total_seq_len * head_dim; // Elements per head
+    
+    // Verify each head separately (Loop over Num Heads)
+    for (uint32_t h = 0; h < num_heads; ++h) {
+        size_t offset = h * stride;
+        
+        // Extract Sub-Tensors for this Head
+        std::vector<float> Q_head(Q_host.begin() + offset, Q_host.begin() + offset + stride);
+        std::vector<float> K_head(K_host.begin() + offset, K_host.begin() + offset + stride);
+        std::vector<float> V_head(V_host.begin() + offset, V_host.begin() + offset + stride);
+        
+        // Run SDPA for this Head
+        std::vector<float> out_head = cpu_sdpa(Q_head, K_head, V_head, total_seq_len, head_dim);
+        
+        // Copy back to Result
+        std::copy(out_head.begin(), out_head.end(), output_cpu.begin() + offset);
+    }
 
     // 7. Verify
     std::cout << "Verifying Results..." << std::endl;
@@ -258,8 +300,9 @@ int main(int argc, char** argv) {
         std::cout << "TEST FAILED" << std::endl;
     }
 
-    // 8. Close Device
-    CloseDevice(device);
+    // 8. Close Device via Mesh
+    mesh_device->close();
     
     return 0;
 }
+

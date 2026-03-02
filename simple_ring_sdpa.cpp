@@ -1,9 +1,14 @@
-#include "simple_ring_sdpa.hpp"  
+#include "simple_ring_sdpa.hpp"
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/bfloat16.hpp>
 #include <tt-metalium/command_queue.hpp>
+
+#include <vector>
+#include <map>
+#include <algorithm>
+#include <iostream>
 
 using namespace tt;
 using namespace tt::tt_metal;
@@ -72,11 +77,11 @@ void RunRingSDPA(
         CircularBufferConfig(St * St * tile_size_bytes, {{CBIndex::c_24, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_24, tile_size_bytes)
     );
-    // CB 25: Sum (St * 1 tiles)
+    // CB 25: Accumulator (reused Sum buffer) - 8 tiles (Output Shape)
     CreateCircularBuffer(
         program,
         core_grid,
-        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_25, DataFormat::Float16_b}})
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_25, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_25, tile_size_bytes)
     );
 
@@ -184,63 +189,94 @@ void RunRingSDPA(
 
     // 5. 运行时参数 (Runtime Args)
     // First, collect all cores to handle ring neighbor logic
-    std::vector<CoreCoord> all_cores;
+    std::map<uint32_t, std::vector<CoreCoord>> rings; // Group by Y (Row) -> Vector of cores (Ring)
+    
     for (const auto& core_range : core_grid.ranges()) {
         for (auto y = core_range.start_coord.y; y <= core_range.end_coord.y; y++) {
             for (auto x = core_range.start_coord.x; x <= core_range.end_coord.x; x++) {
-                all_cores.push_back({x, y});
+                rings[y].push_back({x, y});
             }
         }
     }
     
-    // Iterate over cores and assign specific buffer addresses and indices
-    for (uint32_t i = 0; i < all_cores.size(); ++i) {
-        CoreCoord core = all_cores[i];
-        
-        // Calculate Previous Core (Ring Physical Coords)
-        uint32_t prev_core_idx = (i + num_cores - 1) % num_cores;
-        CoreCoord prev_core_logical = all_cores[prev_core_idx];
-        CoreCoord current_core_physical = device->worker_core_from_logical_core(core);
-        CoreCoord prev_core_physical = device->worker_core_from_logical_core(prev_core_logical);
-        
-        // Arguments for Reader:
-        // 0: Q_addr (local shard from Buffer)
-        // 1: K_addr (local shard from Buffer)
-        // 2: V_addr (local shard from Buffer)
-        // 3: Unused (Output Addr for pure reader?)
-        // 4: Num Cores (Ring Size)
-        // 5: Logical Core Index
-        // 6: Prev Core Physical X
-        // 7: Prev Core Physical Y
-        
-        // Note: For simplified ring, we simulate pulling from logical address or physical?
-        // If we pull from prev core's L1, need physical coords.
-        // Also need addresses of buffers? Buffers are sharded, so each core has its own shard at same local address (L1).
-        // The `Q.buffer()->address()` gives the base address of the buffer. 
-        // For Sharded Buffer, address is same on all cores usually (L1 offset).
-        
-        uint32_t buffer_addr_q = Q.buffer()->address();
-        uint32_t buffer_addr_k = K.buffer()->address();
-        uint32_t buffer_addr_v = V.buffer()->address();
-        
-        SetRuntimeArgs(program, reader_kernel, core, {
-            buffer_addr_q,
-            buffer_addr_k,
-            buffer_addr_v,
-            0, // Unused
-            (uint32_t)num_cores,
-            (uint32_t)current_core_physical.x,
-            (uint32_t)current_core_physical.y, 
-            (uint32_t)prev_core_physical.x,
-            (uint32_t)prev_core_physical.y
+    // Iterate over rings (rows)
+    uint32_t ring_idx = 0;
+    for (auto& [y, ring_cores] : rings) {
+        // Sort cores in ring by X (Sequence Order)
+        std::sort(ring_cores.begin(), ring_cores.end(), [](const CoreCoord& a, const CoreCoord& b) {
+            return a.x < b.x;
         });
         
-        // Set Writer Args
-        SetRuntimeArgs(program, writer_kernel, core, {
-            (uint32_t)Output.buffer()->address(),
-            (uint32_t)num_cores,
-            (uint32_t)i
-        });
+        uint32_t current_ring_size = ring_cores.size(); // Ring Size
+        
+        for (uint32_t i = 0; i < current_ring_size; ++i) {
+            CoreCoord core = ring_cores[i];
+            
+            // Calculate Previous Core in THIS RING (Row Wrap)
+            uint32_t prev_core_idx = (i + current_ring_size - 1) % current_ring_size;
+            CoreCoord prev_core_logical = ring_cores[prev_core_idx];
+            
+            CoreCoord current_core_physical = device->worker_core_from_logical_core(core);
+            CoreCoord prev_core_physical = device->worker_core_from_logical_core(prev_core_logical);
+            
+            // Calculate Tile Offset
+            // We assume Data is linearly packed:
+            // [Ring 0 (Batch 0, Head 0) | Ring 1 (Batch 0, Head 1) | ...]
+            // Inside Ring: [Chunk 0 | Chunk 1 | ...]
+            // Each Chunk = block_tiles
+            // Total Offset = (RingIdx * RingSize + CoreIdxInRing) * block_tiles
+            // Note: block_tiles = 8 (St * DHt)
+            // But wait, total tensor size calculation?
+            // K/V buffer holds (B * H * S * D).
+            // S_chunk = 4 tiles. D_head = 2 tiles.
+            // 1 Chunk = 8 tiles.
+            // Total Chunks = B * H * (S / S_chunk).
+            // We assume `ring_size` = S / S_chunk.
+            // So Total Chunks = B * H * ring_size.
+            // Ring Index maps to (b, h).
+            // Global Chunk Index = ring_idx * ring_size + i.
+            // Start Tile ID = Global Chunk Index * block_tiles.
+            
+            uint32_t start_tile_id = (ring_idx * current_ring_size + i) * block_tiles;
+            
+            uint32_t buffer_addr_q = Q.buffer()->address();
+            uint32_t buffer_addr_k = K.buffer()->address();
+            uint32_t buffer_addr_v = V.buffer()->address();
+            
+            SetRuntimeArgs(program, reader_kernel, core, {
+                buffer_addr_q,
+                buffer_addr_k,
+                buffer_addr_v,
+                start_tile_id, // Pass explicit buffer offset
+                (uint32_t)current_ring_size,
+                (uint32_t)current_core_physical.x,
+                (uint32_t)current_core_physical.y, 
+                (uint32_t)prev_core_physical.x,
+                (uint32_t)prev_core_physical.y
+            });
+            
+            // Set Writer Args
+            // Writer also needs `start_tile_id` to know where to write output?
+            // Writer currently takes Arg 2: `output_idx`?
+            // kernels/dataflow_writer.cpp code check?
+            // Assuming Writer takes arg `start_tile_id`?
+            // Or calculates it?
+            // Let's assume writer takes `start_tile_id` / block_tiles or just tiles.
+            // Currently Writer Arg 2: `(uint32_t)i`.
+            // Wait, previous code passed `i` (linear total index).
+            // Now `i` is Ring-relative.
+            // We need Global Index for Writer too.
+            // Let `global_chunk_idx = ring_idx * current_ring_size + i`.
+            
+            uint32_t global_chunk_idx = ring_idx * current_ring_size + i;
+            
+            SetRuntimeArgs(program, writer_kernel, core, {
+                (uint32_t)Output.buffer()->address(),
+                (uint32_t)current_ring_size,
+                (uint32_t)global_chunk_idx // Use Global linear index for Writer output mapping
+            });
+        }
+        ring_idx++;
     }
 
     // 6. 执行
