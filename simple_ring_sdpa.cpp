@@ -8,7 +8,8 @@
 #include <vector>
 #include <map>
 #include <algorithm>
-#include <iostream>
+#include <cmath>
+#include <cstring>
 
 using namespace tt;
 using namespace tt::tt_metal;
@@ -24,15 +25,16 @@ void RunRingSDPA(
     Tensor& K,
     Tensor& V,
     Tensor& Output,
-    uint32_t ring_size
+    uint32_t ring_size,
+	uint32_t head_dim
 ) {
     Program program = CreateProgram();
 
-    // 1. 计算核心网格 (Core Grid)
+    // 1. Core Grid
     // 简单起见，我们假设 input_tensor 的 shard spec 已经决定了网格大小
     // For this example, we assume Q/K/V are pre-sharded appropriately
     auto core_grid = Q.shard_spec().value().grid;
-    uint32_t num_cores = core_grid.num_cores();
+    // uint32_t num_cores = core_grid.num_cores();  // unused variable
 
     // 2. 配置 Circular Buffers (L1 Cache 管理)
     // 假设 HeadDim=64 (2 tiles), SeqChunk=128 (4 tiles)
@@ -69,31 +71,64 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_2, tile_size_bytes)
     );
 
-    // CB 24: Intermediate (存放 Q*K^T 的结果)
-    // 结果大小是 St * St = 4 * 4 = 16 tiles
+    // CB 24: Intermediate (Q*K^T blocks)
     CreateCircularBuffer(
         program,
         core_grid,
         CircularBufferConfig(St * St * tile_size_bytes, {{CBIndex::c_24, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_24, tile_size_bytes)
     );
-    // CB 25: Accumulator (reused Sum buffer) - 8 tiles (Output Shape)
+    // CB 25/26: Partial output ping-pong buffers (each matches output tile count)
     CreateCircularBuffer(
         program,
         core_grid,
         CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_25, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_25, tile_size_bytes)
     );
-
-    // CB 26: Max (St * 1 tiles)
     CreateCircularBuffer(
         program,
         core_grid,
-        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_26, DataFormat::Float16_b}})
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_26, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_26, tile_size_bytes)
     );
 
-    // CB 16: Output
+    // CB 27/28: Row-wise max ping-pong buffers (St tiles each)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_27, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_27, tile_size_bytes)
+    );
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_28, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_28, tile_size_bytes)
+    );
+
+    // CB 29/30: Row-wise sum ping-pong buffers (St tiles each)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_29, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_29, tile_size_bytes)
+    );
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_30, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_30, tile_size_bytes)
+    );
+
+    // CB 31: exp(max diff) scratch (St tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_31, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_31, tile_size_bytes)
+    );
+
+    // CB 16: Final normalized output
     CreateCircularBuffer(
         program,
         core_grid,
@@ -101,8 +136,7 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_16, tile_size_bytes)
     );
 
-    // CB 3: Scaler (1.0f) - For Reduce operations
-    // Created empty here, will be populated by the kernel
+    // CB 3: Identity scaler (tile of ones) used by reduction helpers
     CreateCircularBuffer(
         program,
         core_grid,
@@ -132,9 +166,9 @@ void RunRingSDPA(
     uint32_t sender_sem_addr = CreateSemaphore(program, core_grid, 0);   // Initialized to 0
     uint32_t receiver_sem_addr = CreateSemaphore(program, core_grid, 0); // Initialized to 0
     
-    // 4. 定义 Kernel
+    // 4. Kernel
     // 4.1 Dataflow Kernels (Reader + Writer)
-    // Reader 将负责：
+    // Reader :
     // 1. Step 0: 读取 Local DRAM -> Local CB
     // 2. Signal "Ready" to Next Core
     // 3. Wait for "Ready" from Prev Core
@@ -170,9 +204,16 @@ void RunRingSDPA(
 
     // 4.2 Compute Kernel (MatMul + Softmax + MatMul)
     // Compile args: RingSize, BlockTiles
+    float softmax_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    uint32_t scale_bits;
+    std::memcpy(&scale_bits, &softmax_scale, sizeof(softmax_scale));
+
     std::vector<uint32_t> compute_compile_args = {
         (uint32_t)ring_size,
-        (uint32_t)block_tiles
+        (uint32_t)St,
+        (uint32_t)St,
+        (uint32_t)DHt,
+        (uint32_t)scale_bits
     };
 
     auto compute_kernel = CreateKernel(
@@ -187,7 +228,7 @@ void RunRingSDPA(
     // Explicitly ignore unused variable warning
     (void)compute_kernel;
 
-    // 5. 运行时参数 (Runtime Args)
+    // 5. Runtime Args
     // First, collect all cores to handle ring neighbor logic
     std::map<uint32_t, std::vector<CoreCoord>> rings; // Group by Y (Row) -> Vector of cores (Ring)
     
@@ -225,14 +266,8 @@ void RunRingSDPA(
             // Inside Ring: [Chunk 0 | Chunk 1 | ...]
             // Each Chunk = block_tiles
             // Total Offset = (RingIdx * RingSize + CoreIdxInRing) * block_tiles
-            // Note: block_tiles = 8 (St * DHt)
-            // But wait, total tensor size calculation?
             // K/V buffer holds (B * H * S * D).
-            // S_chunk = 4 tiles. D_head = 2 tiles.
-            // 1 Chunk = 8 tiles.
             // Total Chunks = B * H * (S / S_chunk).
-            // We assume `ring_size` = S / S_chunk.
-            // So Total Chunks = B * H * ring_size.
             // Ring Index maps to (b, h).
             // Global Chunk Index = ring_idx * ring_size + i.
             // Start Tile ID = Global Chunk Index * block_tiles.
@@ -256,17 +291,6 @@ void RunRingSDPA(
             });
             
             // Set Writer Args
-            // Writer also needs `start_tile_id` to know where to write output?
-            // Writer currently takes Arg 2: `output_idx`?
-            // kernels/dataflow_writer.cpp code check?
-            // Assuming Writer takes arg `start_tile_id`?
-            // Or calculates it?
-            // Let's assume writer takes `start_tile_id` / block_tiles or just tiles.
-            // Currently Writer Arg 2: `(uint32_t)i`.
-            // Wait, previous code passed `i` (linear total index).
-            // Now `i` is Ring-relative.
-            // We need Global Index for Writer too.
-            // Let `global_chunk_idx = ring_idx * current_ring_size + i`.
             
             uint32_t global_chunk_idx = ring_idx * current_ring_size + i;
             
@@ -279,7 +303,7 @@ void RunRingSDPA(
         ring_idx++;
     }
 
-    // 6. 执行
+    // 6. execute
     // Use the member function of CommandQueue instead of the deprecated standalone function
     device->command_queue().enqueue_program(program, false);
 }

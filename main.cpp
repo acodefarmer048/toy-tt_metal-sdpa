@@ -133,20 +133,6 @@ int main(int argc, char** argv) {
     
     std::cout << "Using Device Grid: " << num_rows << " Rows (Heads) x " << num_cols << " Cols (Ring Size)" << std::endl;
 
-    // Iterate over the grid and print core types for debugging
-    std::cout << "Checking Core Types in the grid:" << std::endl;
-    for(uint32_t y = 0; y < num_rows; ++y) {
-        for(uint32_t x = 0; x < num_cols; ++x) {
-            CoreCoord logical_core = {x, y};
-            // Note: In newer Metaliums, core_type might not be directly queryable from logical core on Device without conversion
-            // But we can check if it is a worker core.
-            // Using low-level check if available, or just printing coordinate.
-            // Actually, we can get physical core and check via allocator or similar?
-            // Simplified: Just print the coordinate we are trying to use.
-            CoreCoord phys_core = device->worker_core_from_logical_core(logical_core);
-            std::cout << "Logical: (" << x << "," << y << ") -> Physical: " << phys_core.str() << std::endl;
-        }
-    }
 
     // Core Grid corresponding to Full Device
     CoreRange core_range({0, 0}, {num_cols - 1, num_rows - 1});
@@ -237,7 +223,8 @@ int main(int argc, char** argv) {
         K_tensor,
         V_tensor,
         Out_tensor,
-        num_cores
+        num_cores,
+		head_dim
     );
     
     auto end = std::chrono::high_resolution_clock::now();
