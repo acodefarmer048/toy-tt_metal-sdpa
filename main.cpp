@@ -171,7 +171,8 @@ int main(int argc, char** argv) {
     
     // Random Init
     std::mt19937 gen(42);
-    std::uniform_real_distribution<float> dis(-0.5f, 0.5f);
+    // Wider dynamic range makes it easier to spot numerical or logic errors on device
+    std::normal_distribution<float> dis(0.0f, 2.0f);
     for(size_t i=0; i<total_elements; ++i) {
         Q_host[i] = dis(gen);
         K_host[i] = dis(gen);
@@ -265,23 +266,48 @@ int main(int argc, char** argv) {
 
     // 7. Verify
     std::cout << "Verifying Results..." << std::endl;
+    std::vector<float> output_cpu_bf16(total_elements);
+    for (size_t i = 0; i < total_elements; ++i) {
+        output_cpu_bf16[i] = static_cast<float>(bfloat16(output_cpu[i]));
+    }
+
+    const float abs_tol = 0.02f;   // Close to BF16 unit in last place
+    const float rel_tol = 0.02f;
+
     int mismatch_count = 0;
     float max_diff = 0.0f;
+    float max_rel_diff = 0.0f;
+    float sum_abs_diff = 0.0f;
+    size_t worst_index = 0;
+
     for(size_t i=0; i<total_elements; ++i) {
-        float diff = std::abs(output_cpu[i] - output_device[i]);
-        if (diff > 0.1f) { // Tolerance for BFLOAT16 vs float
-             if (mismatch_count < 10) {
-                 std::cout << "Mismatch at " << i << ": CPU=" << output_cpu[i] << " Device=" << output_device[i] << " Diff=" << diff << std::endl;
-             }
-             mismatch_count++;
+        float ref = output_cpu_bf16[i];
+        float val = output_device[i];
+        float diff = std::abs(ref - val);
+        float rel = (std::abs(ref) > 1e-6f) ? diff / std::abs(ref) : diff;
+
+        sum_abs_diff += diff;
+        if (diff > max_diff) {
+            max_diff = diff;
+            max_rel_diff = rel;
+            worst_index = i;
         }
-        max_diff = std::max(max_diff, diff);
+
+        if (diff > abs_tol && rel > rel_tol) {
+            if (mismatch_count < 10) {
+                std::cout << "Mismatch at " << i << ": CPU=" << ref << " Device=" << val <<
+                             " Diff=" << diff << " RelDiff=" << rel << std::endl;
+            }
+            mismatch_count++;
+        }
     }
-    
+
+    float mean_abs_diff = sum_abs_diff / static_cast<float>(total_elements);
     std::cout << "Total Mismatches: " << mismatch_count << " / " << total_elements << std::endl;
-    std::cout << "Max Diff: " << max_diff << std::endl;
-    
-    if (mismatch_count == 0 || max_diff < 0.2f) { // Lenient check for now
+    std::cout << "Max Diff: " << max_diff << " (rel " << max_rel_diff << ") at index " << worst_index << std::endl;
+    std::cout << "Mean Abs Diff: " << mean_abs_diff << std::endl;
+
+    if (mismatch_count == 0) {
         std::cout << "TEST PASSED" << std::endl;
     } else {
         std::cout << "TEST FAILED" << std::endl;
