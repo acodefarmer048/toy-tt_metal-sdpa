@@ -54,21 +54,33 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_0, tile_size_bytes)
     );
 
-    // CB 1: K (Streaming Ring) Double Buffered
+    // CB 1/4: K (Streaming Ring) Ping-Pong buffers
     CreateCircularBuffer(
         program,
         core_grid,
-        CircularBufferConfig(block_tiles * tile_size_bytes * 2, {{CBIndex::c_1, DataFormat::Float16_b}})
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_1, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_1, tile_size_bytes)
     );
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_4, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_4, tile_size_bytes)
+    );
 
-    // CB 2: V (Streaming Ring) Double Buffered
+    // CB 2/5: V (Streaming Ring) Ping-Pong buffers
     // V has the same shape as K usually (Seq, HeadDim) or (Seq, HeadDim_V)
     CreateCircularBuffer(
         program,
         core_grid,
-        CircularBufferConfig(block_tiles * tile_size_bytes * 2, {{CBIndex::c_2, DataFormat::Float16_b}})
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_2, DataFormat::Float16_b}})
             .set_page_size(CBIndex::c_2, tile_size_bytes)
+    );
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_5, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_5, tile_size_bytes)
     );
 
     // CB 24: Intermediate (Q*K^T blocks)
@@ -178,7 +190,9 @@ void RunRingSDPA(
     std::vector<uint32_t> reader_compile_args = {
         (uint32_t)sender_sem_addr,
         (uint32_t)receiver_sem_addr,
-        packed_scaler_val 
+        packed_scaler_val,
+        block_tiles,
+        tile_size_bytes
     };
 
     auto reader_kernel = CreateKernel(
@@ -303,9 +317,8 @@ void RunRingSDPA(
         ring_idx++;
     }
 
-    // 6. execute
-    // Use the member function of CommandQueue instead of the deprecated standalone function
-    device->command_queue().enqueue_program(program, false);
+    // 6. execute (block until completion so host reads see final results)
+    device->command_queue().enqueue_program(program, true);
 }
 
 } // namespace simple_sdpa

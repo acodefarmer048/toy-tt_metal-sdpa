@@ -19,6 +19,8 @@ void kernel_main() {
     constexpr uint32_t sender_sem_addr = get_compile_time_arg_val(0);
     constexpr uint32_t receiver_sem_addr = get_compile_time_arg_val(1);
     constexpr uint32_t packed_scaler_val = get_compile_time_arg_val(2);
+    constexpr uint32_t block_tiles = get_compile_time_arg_val(3);
+    constexpr uint32_t tile_bytes = get_compile_time_arg_val(4);
 
     // Generate Scaler
     constexpr uint32_t cb_scaler = tt::CBIndex::c_3;
@@ -26,18 +28,12 @@ void kernel_main() {
 
     // CB Allocations
     constexpr uint32_t cb_q = tt::CBIndex::c_0;
-    constexpr uint32_t cb_k = tt::CBIndex::c_1;
-    constexpr uint32_t cb_v = tt::CBIndex::c_2;
+    constexpr uint32_t cb_k_slots[2] = {tt::CBIndex::c_1, tt::CBIndex::c_4};
+    constexpr uint32_t cb_v_slots[2] = {tt::CBIndex::c_2, tt::CBIndex::c_5};
 
-    // Derive tile/block sizing from the CB interface (double-buffered layout)
-    auto& cb_k_if = get_local_cb_interface(cb_k);
-
-    const uint32_t tile_bytes = cb_k_if.fifo_page_size; // matches Float16_b tile size (2048 bytes)
-    const uint32_t block_tiles = cb_k_if.fifo_num_pages / 2; // half of the double-buffered CB capacity
     const uint32_t block_bytes = block_tiles * tile_bytes;
     
     // DRAM Readers
-    const bool is_dram = true; // Utilizing DRAM buffers
     const DataFormat data_format = DataFormat::Float16_b;
     InterleavedAddrGen<data_format> s_q = {
         .bank_base_address = q_addr,
@@ -56,35 +52,38 @@ void kernel_main() {
     // Passed directly as argument 3 now.
     // uint32_t start_tile_id = core_idx * num_tiles; 
 
-    // 2. Load Initial Local Data (Step 0) - FROM DRAM to CB
-    // This chunk seeds both the compute pipe and the ring (slot parity = 0)
+    auto cb_fifo_start = [](uint32_t cb_idx) {
+        auto& cb_if = get_local_cb_interface(cb_idx);
+        return cb_if.fifo_limit - cb_if.fifo_size;
+    };
 
-    cb_reserve_back(cb_k, block_tiles);
-    uint32_t wr_ptr_k = get_write_ptr(cb_k);
+    const uint32_t remote_slot_addr_k[2] = {
+        cb_fifo_start(cb_k_slots[0]),
+        cb_fifo_start(cb_k_slots[1])
+    };
+    const uint32_t remote_slot_addr_v[2] = {
+        cb_fifo_start(cb_v_slots[0]),
+        cb_fifo_start(cb_v_slots[1])
+    };
+
+    // 2. Load Initial Local Data (Step 0) - FROM DRAM to CB (parity 0)
+    const uint32_t cb_k_ping = cb_k_slots[0];
+    cb_reserve_back(cb_k_ping, block_tiles);
+    uint32_t k_ping_wr_ptr = get_write_ptr(cb_k_ping);
     for(uint32_t i=0; i<block_tiles; ++i) {
-        noc_async_read_tile(start_tile_id + i, s_k, wr_ptr_k + i * tile_bytes);
+        noc_async_read_tile(start_tile_id + i, s_k, k_ping_wr_ptr + i * tile_bytes);
     }
     noc_async_read_barrier();
-    cb_push_back(cb_k, block_tiles);
+    cb_push_back(cb_k_ping, block_tiles);
 
-    cb_reserve_back(cb_v, block_tiles);
-    uint32_t wr_ptr_v = get_write_ptr(cb_v);
+    const uint32_t cb_v_ping = cb_v_slots[0];
+    cb_reserve_back(cb_v_ping, block_tiles);
+    uint32_t v_ping_wr_ptr = get_write_ptr(cb_v_ping);
     for(uint32_t i=0; i<block_tiles; ++i) {
-        noc_async_read_tile(start_tile_id + i, s_v, wr_ptr_v + i * tile_bytes);
+        noc_async_read_tile(start_tile_id + i, s_v, v_ping_wr_ptr + i * tile_bytes);
     }
     noc_async_read_barrier();
-    cb_push_back(cb_v, block_tiles);
-
-    // Initial Addresses for Ring Slots (Which are just the CB addresses now)
-    // NOTE: For double buffering, each slot covers block_tiles pages.
-    uint32_t slot_addr_k[2] = {
-        wr_ptr_k,
-        static_cast<uint32_t>(wr_ptr_k + block_bytes)
-    };
-    uint32_t slot_addr_v[2] = {
-        wr_ptr_v,
-        static_cast<uint32_t>(wr_ptr_v + block_bytes)
-    };
+    cb_push_back(cb_v_ping, block_tiles);
 
     uint64_t my_sender_sem_noc = get_noc_addr(my_x, my_y, sender_sem_addr);
     uint64_t my_receiver_sem_noc = get_noc_addr(my_x, my_y, receiver_sem_addr);
@@ -115,26 +114,25 @@ void kernel_main() {
         uint32_t read_parity = (step - 1) & 0x1;
         uint32_t write_parity = step & 0x1;
 
-        uint64_t prev_k_noc_addr = get_noc_addr(prev_core_x, prev_core_y, slot_addr_k[read_parity]);
-        uint64_t prev_v_noc_addr = get_noc_addr(prev_core_x, prev_core_y, slot_addr_v[read_parity]);
+        uint64_t prev_k_noc_addr = get_noc_addr(prev_core_x, prev_core_y, remote_slot_addr_k[read_parity]);
+        uint64_t prev_v_noc_addr = get_noc_addr(prev_core_x, prev_core_y, remote_slot_addr_v[read_parity]);
 
-        // Reserve local space for the incoming block
-        cb_reserve_back(cb_k, block_tiles);
-        cb_reserve_back(cb_v, block_tiles);
-        uint32_t my_wr_k = get_write_ptr(cb_k);
-        uint32_t my_wr_v = get_write_ptr(cb_v);
+        // Reserve local space for the incoming block (ping-pong slot decided by parity)
+        uint32_t k_write_cb = cb_k_slots[write_parity];
+        uint32_t v_write_cb = cb_v_slots[write_parity];
+
+        cb_reserve_back(k_write_cb, block_tiles);
+        cb_reserve_back(v_write_cb, block_tiles);
+        uint32_t my_wr_k = get_write_ptr(k_write_cb);
+        uint32_t my_wr_v = get_write_ptr(v_write_cb);
 
         // READ from Prev -> Me (ping-pong slot decided by cb_reserve_back ordering)
         noc_async_read(prev_k_noc_addr, my_wr_k, block_bytes);
         noc_async_read(prev_v_noc_addr, my_wr_v, block_bytes);
         noc_async_read_barrier();
 
-        cb_push_back(cb_k, block_tiles);
-        cb_push_back(cb_v, block_tiles);
-
-        // Update cached slot addresses in case CB base shifts (should still alternate)
-        slot_addr_k[write_parity] = my_wr_k;
-        slot_addr_v[write_parity] = my_wr_v;
+        cb_push_back(k_write_cb, block_tiles);
+        cb_push_back(v_write_cb, block_tiles);
 
         // C. Acknowledge to previous core that its buffer slot can be reused
         noc_semaphore_inc(prev_receiver_sem_noc, 1);

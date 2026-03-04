@@ -224,7 +224,7 @@ int main(int argc, char** argv) {
         K_tensor,
         V_tensor,
         Out_tensor,
-        num_cores,
+        num_cols,  // ring_size
 		head_dim
     );
     
