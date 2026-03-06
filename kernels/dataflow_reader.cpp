@@ -34,16 +34,15 @@ void kernel_main() {
     const uint32_t block_bytes = block_tiles * tile_bytes;
     
     // DRAM Readers
-    const DataFormat data_format = DataFormat::Float16_b;
-    InterleavedAddrGen<data_format> s_q = {
+    InterleavedAddrGen<true> s_q = {
         .bank_base_address = q_addr,
         .page_size = tile_bytes
     };
-    InterleavedAddrGen<data_format> s_k = {
+    InterleavedAddrGen<true> s_k = {
         .bank_base_address = k_addr,
         .page_size = tile_bytes
     };
-    InterleavedAddrGen<data_format> s_v = {
+    InterleavedAddrGen<true> s_v = {
         .bank_base_address = v_addr,
         .page_size = tile_bytes
     };

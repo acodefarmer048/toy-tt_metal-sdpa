@@ -17,8 +17,7 @@ void kernel_main() {
     constexpr uint32_t tile_bytes = 2048;
 
     // DRAM Writer Configuration
-    const DataFormat data_format = DataFormat::Float16_b;
-    InterleavedAddrGen<data_format> s_out = {
+    InterleavedAddrGen<true> s_out = {
         .bank_base_address = out_addr,
         .page_size = tile_bytes
     };
