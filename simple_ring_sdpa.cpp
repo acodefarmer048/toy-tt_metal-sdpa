@@ -177,8 +177,8 @@ void RunRingSDPA(
     // Let's stick to the simplest "Pull" model where we just wait for neighbors.
     // Actually, explicit semaphores are better.
     
-    uint32_t sender_sem_addr = CreateSemaphore(program, core_grid, 0);   // Initialized to 0
-    uint32_t receiver_sem_addr = CreateSemaphore(program, core_grid, 0); // Initialized to 0
+    uint32_t sender_sem_id = CreateSemaphore(program, core_grid, 0);   // Initialized to 0
+    uint32_t receiver_sem_id = CreateSemaphore(program, core_grid, 0); // Initialized to 0
     
     // 4. Kernel
     // 4.1 Dataflow Kernels (Reader + Writer)
@@ -190,8 +190,6 @@ void RunRingSDPA(
     // 5. Signal "Done" to Prev Core
     
     std::vector<uint32_t> reader_compile_args = {
-        (uint32_t)sender_sem_addr,
-        (uint32_t)receiver_sem_addr,
         packed_scaler_val,
         block_tiles,
         tile_size_bytes
@@ -271,9 +269,12 @@ void RunRingSDPA(
             // Calculate Previous Core in THIS RING (Row Wrap)
             uint32_t prev_core_idx = (i + ring_size - 1) % ring_size;
             CoreCoord prev_core_logical = ring_cores[prev_core_idx];
+            // Calculate Downstream Core in THIS RING (Row Wrap)
+            uint32_t post_core_idx = (i + 1) % ring_size;
+            CoreCoord post_core_logical = ring_cores[post_core_idx];
             
-            CoreCoord current_core_physical = device->worker_core_from_logical_core(core);
             CoreCoord prev_core_physical = device->worker_core_from_logical_core(prev_core_logical);
+            CoreCoord post_core_physical = device->worker_core_from_logical_core(post_core_logical);
             
             // Calculate Tile Offset
             // We assume Data is linearly packed:
@@ -295,10 +296,12 @@ void RunRingSDPA(
                 buffer_addr_v,
                 start_tile_id, // Pass explicit buffer offset
                 (uint32_t)ring_size,
-                (uint32_t)current_core_physical.x,
-                (uint32_t)current_core_physical.y, 
+                (uint32_t)post_core_physical.x,
+                (uint32_t)post_core_physical.y, 
                 (uint32_t)prev_core_physical.x,
-                (uint32_t)prev_core_physical.y
+                (uint32_t)prev_core_physical.y, 
+				(uint32_t)sender_sem_id,
+				(uint32_t)receiver_sem_id
             });
             
             // Set Writer Args
