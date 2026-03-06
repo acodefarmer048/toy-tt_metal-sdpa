@@ -53,8 +53,8 @@ void kernel_main() {
     // uint32_t start_tile_id = core_idx * num_tiles; 
 
     auto cb_fifo_start = [](uint32_t cb_idx) {
-        auto& cb_if = get_local_cb_interface(cb_idx);
-        return cb_if.fifo_limit - cb_if.fifo_size;
+        auto& cb_if = get_remote_sender_cb_interface(cb_idx);
+        return cb_if.fifo_start_addr; 
     };
 
     const uint32_t remote_slot_addr_k[2] = {
@@ -74,7 +74,8 @@ void kernel_main() {
         noc_async_read_tile(start_tile_id + i, s_k, k_ping_wr_ptr + i * tile_bytes);
     }
     noc_async_read_barrier();
-    cb_push_back(cb_k_ping, block_tiles);
+	// compute_sdpa would consume it before it being passed to the next core
+    // cb_push_back(cb_k_ping, block_tiles); 
 
     const uint32_t cb_v_ping = cb_v_slots[0];
     cb_reserve_back(cb_v_ping, block_tiles);
@@ -83,7 +84,8 @@ void kernel_main() {
         noc_async_read_tile(start_tile_id + i, s_v, v_ping_wr_ptr + i * tile_bytes);
     }
     noc_async_read_barrier();
-    cb_push_back(cb_v_ping, block_tiles);
+	// compute_sdpa would consume it before it being passed to the next core
+    // cb_push_back(cb_v_ping, block_tiles);
 
     uint64_t my_sender_sem_noc = get_noc_addr(my_x, my_y, sender_sem_addr);
     uint64_t my_receiver_sem_noc = get_noc_addr(my_x, my_y, receiver_sem_addr);
@@ -109,10 +111,15 @@ void kernel_main() {
         noc_semaphore_wait(prev_sender_sem_noc, step);
 
         // B. Wait for downstream neighbor to finish consuming the slot we're about to overwrite
-        noc_semaphore_wait(my_receiver_sem_noc, step);
+		// modified from step to step-1
+        noc_semaphore_wait(my_receiver_sem_noc, step-1);
 
         uint32_t read_parity = (step - 1) & 0x1;
         uint32_t write_parity = step & 0x1;
+
+		cb_push_back(cb_k_slots[read_parity], block_tiles); 
+		cb_push_back(cb_v_slots[read_parity], block_tiles); 
+		// as downstream neighbor have received the slot, compute_sdpa could go on;
 
         uint64_t prev_k_noc_addr = get_noc_addr(prev_core_x, prev_core_y, remote_slot_addr_k[read_parity]);
         uint64_t prev_v_noc_addr = get_noc_addr(prev_core_x, prev_core_y, remote_slot_addr_v[read_parity]);
@@ -121,8 +128,8 @@ void kernel_main() {
         uint32_t k_write_cb = cb_k_slots[write_parity];
         uint32_t v_write_cb = cb_v_slots[write_parity];
 
-        cb_reserve_back(k_write_cb, block_tiles);
-        cb_reserve_back(v_write_cb, block_tiles);
+        cb_reserve_back(k_write_cb, block_tiles); // cooperate with cb_pop_front in compute_sdpa
+        cb_reserve_back(v_write_cb, block_tiles); // cooperate with cb_pop_front in compute_sdpa
         uint32_t my_wr_k = get_write_ptr(k_write_cb);
         uint32_t my_wr_v = get_write_ptr(v_write_cb);
 
@@ -131,8 +138,9 @@ void kernel_main() {
         noc_async_read(prev_v_noc_addr, my_wr_v, block_bytes);
         noc_async_read_barrier();
 
-        cb_push_back(k_write_cb, block_tiles);
-        cb_push_back(v_write_cb, block_tiles);
+		// they cannot be push_back immediately
+        // cb_push_back(k_write_cb, block_tiles);
+        // cb_push_back(v_write_cb, block_tiles);
 
         // C. Acknowledge to previous core that its buffer slot can be reused
         noc_semaphore_inc(prev_receiver_sem_noc, 1);
@@ -140,6 +148,9 @@ void kernel_main() {
         // D. Signal next core that a new block is ready in this slot
         noc_semaphore_inc(my_sender_sem_noc, 1);
     }
+	// last K/V block, as we donnot forward it to downstream neighbor, push it back at once
+	cb_push_back(cb_k_slots[(num_cores-1)&0x1], block_tiles); 
+	cb_push_back(cb_v_slots[(num_cores-1)&0x1], block_tiles); 
 }
 
 

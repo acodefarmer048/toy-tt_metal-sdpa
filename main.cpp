@@ -33,6 +33,15 @@ std::vector<float> unpack_uint32_to_float(const std::vector<uint32_t>& input) {
     return float_vec;
 }
 
+// Helper function to display matrix
+void display_matrix(const std::vector<float>& matrix, uint32_t row_size) {
+	for(size_t i=0; i<matrix.size()/row_size; ++i) {
+		for(size_t j=0; j<row_size; ++j) {
+			std::cout << matrix[i*row_size+j] << " ";
+		}
+		std::cout << std::endl;
+	}
+}
 // Memory Layout: [Batch, Heads, SeqLen, HeadDim]
 // For simplicity here: [1, 1, SeqLen, HeadDim]
 // Row-major iteration for CPU implementation
@@ -117,16 +126,16 @@ std::shared_ptr<distributed::MeshBuffer> create_and_init_mesh_buffer(
 
 int main(int argc, char** argv) {
     // 0. Init Device (Mesh Device: Unit Mesh)
-    int device_id = 0;
+    constexpr int device_id = 0;
     std::shared_ptr<distributed::MeshDevice> mesh_device = distributed::MeshDevice::create_unit_mesh(device_id);
     
     // Get Local Device (needed for single device APIs passed to RunRingSDPA)
     // For unit mesh, there is only 1 device.
-    IDevice* device = mesh_device->get_device(mesh_device->get_device_ids()[0]);
+    // IDevice* device = mesh_device->get_device(mesh_device->get_device_ids()[0]);
 
     // 1. Define Shapes based on Device Grid
     // Get the logical compute grid size
-    CoreCoord grid_size = device->compute_with_storage_grid_size();
+    CoreCoord grid_size = mesh_device->compute_with_storage_grid_size();
     
     uint32_t num_rows = grid_size.y; // Heads = Number of Rows
     uint32_t num_cols = grid_size.x; // Ring Size = Number of Cols
@@ -138,20 +147,18 @@ int main(int argc, char** argv) {
     CoreRange core_range({0, 0}, {num_cols - 1, num_rows - 1});
     CoreRangeSet core_set({core_range});
     
-    uint32_t num_cores = num_rows * num_cols;
-    
-    uint32_t batch = 1;
-    uint32_t num_heads = num_rows;   // One head per row
-    uint32_t head_dim_tiles = 2;     // 64 (32*2)
     uint32_t tile_size = 32;
-
-    // Per Core Chunk: SeqLen=128 (4 tiles), HeadDim=64 (2 tiles)
-    uint32_t seq_chunk_tiles = 4; // S_core / 32
+	uint32_t ring_size = num_cols;
     
+	// problem parameter
+    uint32_t batch = 1;
+    // Per Core Chunk: SeqLen=128 (4 tiles), 
+    uint32_t seq_chunk_tiles = 4; // S_core / 32
+    uint32_t num_heads = num_rows;   // One head per row
+    uint32_t head_dim_tiles = 2;     // Head_dim / 32
     uint32_t seq_len_per_core = seq_chunk_tiles * tile_size; // 128
     uint32_t head_dim = head_dim_tiles * tile_size;          // 64
-    uint32_t total_seq_len = seq_len_per_core * num_cols;    // Seq Len scales with Ring Size
-    
+    uint32_t total_seq_len = seq_len_per_core * ring_size;    // Seq Len scales with Ring Size
     uint32_t total_elements = batch * num_heads * total_seq_len * head_dim;
     
     std::cout << "Problem Config:" << std::endl;
@@ -219,13 +226,14 @@ int main(int argc, char** argv) {
     auto start = std::chrono::high_resolution_clock::now();
     
     simple_sdpa::RunRingSDPA(
-        device,
+        mesh_device,
         Q_tensor,
         K_tensor,
         V_tensor,
         Out_tensor,
-        num_cols,  // ring_size
-		head_dim
+        ring_size,  
+		head_dim,
+		seq_chunk_tiles
     );
     
     auto end = std::chrono::high_resolution_clock::now();

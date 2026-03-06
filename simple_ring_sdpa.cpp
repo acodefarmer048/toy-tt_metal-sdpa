@@ -20,14 +20,16 @@ using namespace tt::tt_metal;
 namespace simple_sdpa {
 
 void RunRingSDPA(
-    IDevice* device,
+    std::shared_ptr<distributed::MeshDevice> device,
     Tensor& Q,
     Tensor& K,
     Tensor& V,
     Tensor& Output,
     uint32_t ring_size,
-	uint32_t head_dim
+	uint32_t head_dim,
+	uint32_t seq_chunk_tiles
 ) {
+	distributed::MeshCommandQueue& cq = device->mesh_command_queue();
     Program program = CreateProgram();
 
     // 1. Core Grid
@@ -42,8 +44,8 @@ void RunRingSDPA(
     uint32_t datum_size_bytes = 2; // Bfloat16
     uint32_t tile_size_bytes = tile_pixels * datum_size_bytes;
 
-    uint32_t DHt = 2;       // Head Dimension (tiles)
-    uint32_t St = 4;        // Sequence Chunk Size (tiles)
+    uint32_t DHt = head_dim;       // Head Dimension (tiles)
+    uint32_t St = seq_chunk_tiles;        // Sequence Chunk Size (tiles)
     uint32_t block_tiles = St * DHt; // Q 或 K 的一个 Chunk 包含多少个 tiles (4*2=8)
 
     // CB 0: Q (Static)
@@ -262,13 +264,12 @@ void RunRingSDPA(
             return a.x < b.x;
         });
         
-        uint32_t current_ring_size = ring_cores.size(); // Ring Size
         
-        for (uint32_t i = 0; i < current_ring_size; ++i) {
+        for (uint32_t i = 0; i < ring_size; ++i) {
             CoreCoord core = ring_cores[i];
             
             // Calculate Previous Core in THIS RING (Row Wrap)
-            uint32_t prev_core_idx = (i + current_ring_size - 1) % current_ring_size;
+            uint32_t prev_core_idx = (i + ring_size - 1) % ring_size;
             CoreCoord prev_core_logical = ring_cores[prev_core_idx];
             
             CoreCoord current_core_physical = device->worker_core_from_logical_core(core);
@@ -278,15 +279,11 @@ void RunRingSDPA(
             // We assume Data is linearly packed:
             // [Ring 0 (Batch 0, Head 0) | Ring 1 (Batch 0, Head 1) | ...]
             // Inside Ring: [Chunk 0 | Chunk 1 | ...]
-            // Each Chunk = block_tiles
+            // Each Chunk = block_tiles = head_dim * seq_pre_core
             // Total Offset = (RingIdx * RingSize + CoreIdxInRing) * block_tiles
-            // K/V buffer holds (B * H * S * D).
-            // Total Chunks = B * H * (S / S_chunk).
-            // Ring Index maps to (b, h).
-            // Global Chunk Index = ring_idx * ring_size + i.
-            // Start Tile ID = Global Chunk Index * block_tiles.
             
-            uint32_t start_tile_id = (ring_idx * current_ring_size + i) * block_tiles;
+            uint32_t global_chunk_idx = ring_idx * ring_size + i;
+            uint32_t start_tile_id = (ring_idx * ring_size + i) * block_tiles;
             
             uint32_t buffer_addr_q = Q.buffer()->address();
             uint32_t buffer_addr_k = K.buffer()->address();
@@ -297,7 +294,7 @@ void RunRingSDPA(
                 buffer_addr_k,
                 buffer_addr_v,
                 start_tile_id, // Pass explicit buffer offset
-                (uint32_t)current_ring_size,
+                (uint32_t)ring_size,
                 (uint32_t)current_core_physical.x,
                 (uint32_t)current_core_physical.y, 
                 (uint32_t)prev_core_physical.x,
@@ -306,11 +303,10 @@ void RunRingSDPA(
             
             // Set Writer Args
             
-            uint32_t global_chunk_idx = ring_idx * current_ring_size + i;
             
             SetRuntimeArgs(program, writer_kernel, core, {
                 (uint32_t)Output.buffer()->address(),
-                (uint32_t)current_ring_size,
+                (uint32_t)ring_size,
                 (uint32_t)global_chunk_idx // Use Global linear index for Writer output mapping
             });
         }
@@ -318,7 +314,10 @@ void RunRingSDPA(
     }
 
     // 6. execute (block until completion so host reads see final results)
-    device->command_queue().enqueue_program(program, true);
+	distributed::MeshWorkload workload;
+	distributed::MeshCoordinateRange device_range = distributed::MeshCoordinateRange(device->shape());
+	workload.add_program(device_range, std::move(program));
+	distributed::EnqueueMeshWorkload(cq, workload, /*blocking=*/true);
 }
 
 } // namespace simple_sdpa
