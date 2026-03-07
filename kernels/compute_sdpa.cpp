@@ -15,7 +15,7 @@ void MAIN {
     constexpr uint32_t cb_q = tt::CBIndex::c_0;
     constexpr uint32_t cb_k_slots[2] = {tt::CBIndex::c_1, tt::CBIndex::c_4};
     constexpr uint32_t cb_v_slots[2] = {tt::CBIndex::c_2, tt::CBIndex::c_5};
-    constexpr uint32_t cb_identity = tt::CBIndex::c_3;
+    constexpr uint32_t cb_identity = tt::CBIndex::c_3;   // reduce scaler
     constexpr uint32_t cb_out = tt::CBIndex::c_16;
     constexpr uint32_t cb_qk_im = tt::CBIndex::c_24;
     constexpr uint32_t cb_mm2_prev = tt::CBIndex::c_25;
@@ -150,13 +150,13 @@ void MAIN {
 	log_block(alias_prev_sum, alias_cur_max, Sq_chunk_t);
 
 	// Scale prev_max by scale_fp32
-	mul_block_bcast_scalar_inplace<cb_scale_in, Sq_chunk_t>(alias_prev_max);
+	mul_block_bcast_scalar_inplace<cb_identity, Sq_chunk_t>(alias_prev_max);
 	add_block_inplace(alias_prev_max, alias_cur_max, Sq_chunk_t);
 
 	/* cb_cur_sum = 1.0 / cb_cur_sum */
 	recip_block_inplace(alias_prev_sum, Sq_chunk_t);
 	/* cb_out_accumulate_im *= cb_cur_sum */
-	mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_mm2_prev_out, alias_prev_sum);
+	mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_prev_out, alias_prev_sum);
 	if (step > 0) {
 		// Update output according to previous and current LSE
 		/**
@@ -169,8 +169,8 @@ void MAIN {
 
 		uint32_t alias_cur_lse = alias_prev_max;      // full
 		uint32_t alias_sig = alias_cur_max;           // empty
-		uint32_t alias_cur_out = alias_mm2_prev_out;  // full
-		uint32_t alias_sub = alias_mm2_cur_out;       // empty
+		uint32_t alias_cur_out = alias_prev_out;  // full
+		uint32_t alias_sub = alias_cur_out;       // empty
 
 		// alias_sig = sigmoid(alias_cur_lse - cb_lse_in)
 		sigmoid_sub(alias_cur_lse, cb_lse_in, alias_sig, Sq_chunk_t);
