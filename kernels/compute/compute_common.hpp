@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
 #include <cstdint>
 
 #define REDUCE_OP (PoolType::MAX)
@@ -19,6 +20,34 @@
 #include "compute_kernel_api/reduce.h"
 
 template <uint32_t num_tiles>
+
+#ifndef SUB_EXP_GRANULARITY
+#define SUB_EXP_GRANULARITY 1
+#endif
+
+#ifndef LOG2_SUB_EXP_GRANULARITY
+#define LOG2_SUB_EXP_GRANULARITY 0
+#endif
+
+#ifndef DHT_GRANULARITY
+#define DHT_GRANULARITY 1
+#endif
+
+#ifndef LOG2_DHT_GRANULARITY
+#define LOG2_DHT_GRANULARITY 0
+#endif
+
+#ifndef STATS_GRANULARITY
+#define STATS_GRANULARITY 1
+#endif
+
+#ifndef LOG2_STATS_GRANULARITY
+#define LOG2_STATS_GRANULARITY 0
+#endif
+
+#ifndef EXP_APPROX_MODE
+#define EXP_APPROX_MODE true
+#endif
 void max_block_inplace(uint32_t in0, uint32_t in1) {
     // inputs come in full, outputs go out full
     copy_tile_to_dst_init_short(in0);
