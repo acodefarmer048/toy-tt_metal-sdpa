@@ -202,9 +202,10 @@ int main(int argc, char** argv) {
     auto K_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, K_host);
     auto V_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, V_host);
     
-    // Output Buffer (Empty)
+    // Output & LSE Buffers (Empty)
     std::vector<float> zeros(total_elements, 0.0f);
     auto Out_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, zeros);
+    auto LSE_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, zeros);
 
     // Extract Local Buffers from MeshBuffers
     // Use the aliasing constructor of shared_ptr to avoid double-freeing the buffer.
@@ -213,6 +214,7 @@ int main(int argc, char** argv) {
     auto K_buf = std::shared_ptr<Buffer>(K_mesh_buf, K_mesh_buf->get_backing_buffer());
     auto V_buf = std::shared_ptr<Buffer>(V_mesh_buf, V_mesh_buf->get_backing_buffer());
     auto Out_buf = std::shared_ptr<Buffer>(Out_mesh_buf, Out_mesh_buf->get_backing_buffer());
+    auto LSE_buf = std::shared_ptr<Buffer>(LSE_mesh_buf, LSE_mesh_buf->get_backing_buffer());
 
     // 4. Run Simplified Ring SDPA
     std::cout << "Starting Ring SDPA..." << std::endl;
@@ -222,6 +224,7 @@ int main(int argc, char** argv) {
     simple_sdpa::Tensor K_tensor(K_buf, global_shape, shard_spec);
     simple_sdpa::Tensor V_tensor(V_buf, global_shape, shard_spec);
     simple_sdpa::Tensor Out_tensor(Out_buf, global_shape, shard_spec);
+    simple_sdpa::Tensor LSE_tensor(LSE_buf, global_shape, shard_spec);
     
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -231,6 +234,7 @@ int main(int argc, char** argv) {
         K_tensor,
         V_tensor,
         Out_tensor,
+        LSE_tensor,
         ring_size,  
 		head_dim,
 		seq_chunk_tiles

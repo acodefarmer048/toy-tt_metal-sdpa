@@ -25,6 +25,7 @@ void RunRingSDPA(
     Tensor& K,
     Tensor& V,
     Tensor& Output,
+    Tensor& LSE,
     uint32_t ring_size,
 	uint32_t head_dim,
 	uint32_t seq_chunk_tiles
@@ -150,6 +151,30 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_16, tile_size_bytes)
     );
 
+    // CB 17: LSE output tiles (Sq_chunk_t tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_17, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_17, tile_size_bytes)
+    );
+
+    // CB 18: LSE input tiles loaded from DRAM (Sq_chunk_t tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(St * tile_size_bytes, {{CBIndex::c_18, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_18, tile_size_bytes)
+    );
+
+    // CB 19: Previous output block loaded from DRAM (block_tiles)
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(block_tiles * tile_size_bytes, {{CBIndex::c_19, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_19, tile_size_bytes)
+    );
+
     // CB 6: Reduce scaler (tile of ones) used by reduction helpers
     CreateCircularBuffer(
         program,
@@ -217,7 +242,10 @@ void RunRingSDPA(
 
     std::vector<uint32_t> writer_compile_args = {
         packed_scaler_val,
-        packed_scale_val
+        packed_scale_val,
+        block_tiles,
+        St,
+        tile_size_bytes
     };
 
     auto reader_kernel = CreateKernel(
@@ -331,6 +359,7 @@ void RunRingSDPA(
             
             SetRuntimeArgs(program, writer_kernel, core, {
                 (uint32_t)Output.buffer()->address(),
+                (uint32_t)LSE.buffer()->address(),
                 (uint32_t)ring_size,
                 (uint32_t)global_chunk_idx // Use Global linear index for Writer output mapping
             });

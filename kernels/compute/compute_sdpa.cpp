@@ -12,13 +12,16 @@ void MAIN {
     constexpr uint32_t DHt = get_compile_time_arg_val(3);
     constexpr uint32_t scale_fp32_bits = get_compile_time_arg_val(4);
 
-	constexpr uint32_t cb_q = tt::CBIndex::c_0;
-	constexpr uint32_t cb_k_slots[2] = {tt::CBIndex::c_1, tt::CBIndex::c_4};
-	constexpr uint32_t cb_v_slots[2] = {tt::CBIndex::c_2, tt::CBIndex::c_5};
-	constexpr uint32_t cb_reduce_scale_in = tt::CBIndex::c_6;
-	constexpr uint32_t cb_scale_in = tt::CBIndex::c_7;
-	constexpr uint32_t cb_col_identity = tt::CBIndex::c_8;
-	constexpr uint32_t cb_out = tt::CBIndex::c_16;
+    constexpr uint32_t cb_q = tt::CBIndex::c_0;
+    constexpr uint32_t cb_k_slots[2] = {tt::CBIndex::c_1, tt::CBIndex::c_4};
+    constexpr uint32_t cb_v_slots[2] = {tt::CBIndex::c_2, tt::CBIndex::c_5};
+    constexpr uint32_t cb_identity_scale_in = tt::CBIndex::c_6;
+    constexpr uint32_t cb_scale_in = tt::CBIndex::c_7;
+    constexpr uint32_t cb_col_identity = tt::CBIndex::c_8;
+    constexpr uint32_t cb_lse_in = tt::CBIndex::c_18;
+    constexpr uint32_t cb_prev_out = tt::CBIndex::c_19;
+    constexpr uint32_t cb_out = tt::CBIndex::c_16;
+    constexpr uint32_t cb_lse_out = tt::CBIndex::c_17;
     constexpr uint32_t cb_qk_im = tt::CBIndex::c_24;
     constexpr uint32_t cb_mm2_prev = tt::CBIndex::c_25;
     constexpr uint32_t cb_mm2_cur = tt::CBIndex::c_26;
@@ -50,9 +53,9 @@ void MAIN {
         uint32_t cb_k_cur = cb_k_slots[parity];
         uint32_t cb_v_cur = cb_v_slots[parity];
 
-        cb_wait_front(cb_k_cur, kv_chunk_tiles);
 
 		mm_init(cb_q, cb_k_cur, cb_qk_im);
+        cb_wait_front(cb_k_cur, kv_chunk_tiles);
 
 		matmul_blocks(
 			cb_q,
@@ -78,7 +81,7 @@ void MAIN {
                 reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, Sk_chunk_t>(
                     alias_cur_max, alias_prev_max, k_chunk > iter_k_chunk_start);
 		 */
-		reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_reduce_scale_in, Sq_chunk_t, Sk_chunk_t>(
+        reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, Sk_chunk_t>(
             alias_cur_max, alias_prev_max, !first_block);
 
 		/**
@@ -135,74 +138,43 @@ void MAIN {
         std::swap(alias_prev_out, alias_cur_out);
         first_block = false;
 
+        // Finalize current iteration's contribution
+        matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);
+        log_block(alias_prev_sum, alias_cur_max, Sq_chunk_t);
+        mul_block_bcast_scalar_inplace<cb_scale_in, Sq_chunk_t>(alias_prev_max);
+        add_block_inplace(alias_prev_max, alias_cur_max, Sq_chunk_t);
+        recip_block_inplace(alias_prev_sum, Sq_chunk_t);
+        mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_prev_out, alias_prev_sum);
+
+        if (step > 0) {
+            cb_wait_front(cb_lse_in, Sq_chunk_t);
+            cb_wait_front(cb_prev_out, out_chunk_tiles);
+
+            uint32_t alias_cur_lse = alias_prev_max;
+            uint32_t alias_sig = alias_cur_max;
+            uint32_t alias_cur_out_block = alias_prev_out;
+            uint32_t alias_sub = alias_cur_out;
+
+            sigmoid_sub(alias_cur_lse, cb_lse_in, alias_sig, Sq_chunk_t);
+            sub_block(cb_prev_out, alias_cur_out_block, alias_sub, out_chunk_tiles);
+            mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_sub, alias_sig);
+            sub_block(cb_prev_out, alias_sub, cb_out, out_chunk_tiles);
+            cb_pop_front(cb_prev_out, out_chunk_tiles);
+            cb_pop_front(alias_cur_out_block, out_chunk_tiles);
+            cb_pop_front(alias_sub, out_chunk_tiles);
+
+            logsigmoid_sub(cb_lse_in, alias_cur_lse, alias_sig, Sq_chunk_t);
+            sub_block(cb_lse_in, alias_sig, cb_lse_out, Sq_chunk_t);
+            cb_pop_front(alias_sig, Sq_chunk_t);
+            cb_pop_front(alias_cur_lse, Sq_chunk_t);
+            cb_pop_front(cb_lse_in, Sq_chunk_t);
+        } else {
+            pack_reconfig_data_format(cb_out);
+            copy_block(alias_prev_out, cb_out, out_chunk_tiles);
+            copy_block(alias_prev_max, cb_lse_out, Sq_chunk_t);
+        }
     }
-	// TODO
-	// Calculate current LSE
-	// Use alias_cur_max as intermediate buffer.
-	// template <uint32_t M>
-	// void matmul_reduce(uint32_t in1_cb, const uint32_t& out_cb), out_cb is used as in0_cb
-	// N is set to 1
-    // precondition: in0_cb has M*K produced
-    // preconditino: in1_cb has K*N produced
-    // postcondition: in0_cb is full, in1_cb is empty
-    // postcondition: out_cb has M*N produced
-	matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);
 
-	// void log_block(uint32_t in_cb, uint32_t out_cb, uint32_t num_tiles) {
-	log_block(alias_prev_sum, alias_cur_max, Sq_chunk_t);
-
-	// Scale prev_max by scale_fp32
-	mul_block_bcast_scalar_inplace<cb_scale_in, Sq_chunk_t>(alias_prev_max);
-	add_block_inplace(alias_prev_max, alias_cur_max, Sq_chunk_t);
-
-	/* cb_cur_sum = 1.0 / cb_cur_sum */
-	recip_block_inplace(alias_prev_sum, Sq_chunk_t);
-	/* cb_out_accumulate_im *= cb_cur_sum */
-	mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_prev_out, alias_prev_sum);
-	if (step > 0) {
-		// Update output according to previous and current LSE
-		/**
-		 * sig = torch.sigmoid(cur_lse - prev_lse)
-		 * out = prev_out - sig * (prev_out - cur_out)
-		 * lse = prev_lse - torch.logsigmoid(prev_lse - cur_lse)
-		 */
-		cb_wait_front(cb_lse_in, Sq_chunk_t);
-		cb_wait_front(cb_prev_out, out_chunk_tiles);
-
-		uint32_t alias_cur_lse = alias_prev_max;      // full
-		uint32_t alias_sig = alias_cur_max;           // empty
-		uint32_t alias_cur_out = alias_prev_out;  // full
-		uint32_t alias_sub = alias_cur_out;       // empty
-
-		// alias_sig = sigmoid(alias_cur_lse - cb_lse_in)
-		sigmoid_sub(alias_cur_lse, cb_lse_in, alias_sig, Sq_chunk_t);
-
-		// alias_sub = cb_prev_out - alias_cur_out
-		sub_block(cb_prev_out, alias_cur_out, alias_sub, out_chunk_tiles);
-		// alias_sub *= alias_sig
-		mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_sub, alias_sig);
-		// cb_out = cb_prev_out - alias_sub
-		sub_block(cb_prev_out, alias_sub, cb_out, out_chunk_tiles);
-		cb_pop_front(cb_prev_out, out_chunk_tiles);
-		cb_pop_front(alias_cur_out, out_chunk_tiles);
-		cb_pop_front(alias_sub, out_chunk_tiles);
-
-		// alias_sig = sigmoid(cb_lse_in - alias_cur_lse)
-		// alias_cur_lse = log(alias_sig)
-		// cb_lse_out = cb_lse_in - alias_cur_lse
-		logsigmoid_sub(cb_lse_in, alias_cur_lse, alias_sig, Sq_chunk_t);
-		sub_block(cb_lse_in, alias_sig, cb_lse_out, Sq_chunk_t);
-		cb_pop_front(alias_sig, Sq_chunk_t);
-		cb_pop_front(alias_cur_lse, Sq_chunk_t);
-		cb_pop_front(cb_lse_in, Sq_chunk_t);
-
-	} else {
-		pack_reconfig_data_format(cb_out);
-		copy_block(alias_mm2_prev_out, cb_out, out_chunk_tiles);
-
-		copy_block(alias_prev_max, cb_lse_out, Sq_chunk_t);
-	}
-
-	cb_pop_front(cb_q_in, q_chunk_tiles);
+    cb_pop_front(cb_q, q_chunk_tiles);
 }
 }

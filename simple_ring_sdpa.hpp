@@ -13,6 +13,7 @@ void RunRingSDPA(
     Tensor& K,
     Tensor& V,
     Tensor& Output,
+    Tensor& LSE,
     uint32_t ring_size,
 	uint32_t head_dim,
 	uint32_t seq_chunk
