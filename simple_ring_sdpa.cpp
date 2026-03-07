@@ -150,17 +150,38 @@ void RunRingSDPA(
             .set_page_size(CBIndex::c_16, tile_size_bytes)
     );
 
-    // CB 3: Identity scaler (tile of ones) used by reduction helpers
+    // CB 6: Reduce scaler (tile of ones) used by reduction helpers
     CreateCircularBuffer(
         program,
         core_grid,
-        CircularBufferConfig(tile_size_bytes, {{CBIndex::c_3, DataFormat::Float16_b}})
-            .set_page_size(CBIndex::c_3, tile_size_bytes)
+        CircularBufferConfig(tile_size_bytes, {{CBIndex::c_6, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_6, tile_size_bytes)
     );
 
-    // Prepare scalar value for kernel argument
+    // CB 7: Scalar used for scale multiplication
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(tile_size_bytes, {{CBIndex::c_7, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_7, tile_size_bytes)
+    );
+
+    // CB 8: Column identity vector for matmul_reduce
+    CreateCircularBuffer(
+        program,
+        core_grid,
+        CircularBufferConfig(tile_size_bytes, {{CBIndex::c_8, DataFormat::Float16_b}})
+            .set_page_size(CBIndex::c_8, tile_size_bytes)
+    );
+
+    // Prepare scalar values for kernel arguments
     bfloat16 bfloat_scaler_val(1.0f);
     uint32_t packed_scaler_val = pack_two_bfloat16_into_uint32({bfloat_scaler_val, bfloat_scaler_val});
+    float softmax_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    uint32_t scale_bits;
+    std::memcpy(&scale_bits, &softmax_scale, sizeof(softmax_scale));
+    bfloat16 bfloat_scale_val(softmax_scale);
+    uint32_t packed_scale_val = pack_two_bfloat16_into_uint32({bfloat_scale_val, bfloat_scale_val});
 
     // 3. Semaphores
     // 我们需要信号量来同步 Ring 中的数据传输
@@ -190,14 +211,18 @@ void RunRingSDPA(
     // 5. Signal "Done" to Prev Core
     
     std::vector<uint32_t> reader_compile_args = {
-        packed_scaler_val,
         block_tiles,
         tile_size_bytes
     };
 
+    std::vector<uint32_t> writer_compile_args = {
+        packed_scaler_val,
+        packed_scale_val
+    };
+
     auto reader_kernel = CreateKernel(
         program,
-       OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow_reader.cpp",
+       OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow/dataflow_reader.cpp",
         core_grid,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
@@ -208,20 +233,17 @@ void RunRingSDPA(
 
     auto writer_kernel = CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow_writer.cpp",
+        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow/dataflow_writer.cpp",
         core_grid,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
-            .noc = NOC::RISCV_0_default
+            .noc = NOC::RISCV_0_default,
+            .compile_args = writer_compile_args
         }
     );
 
     // 4.2 Compute Kernel (MatMul + Softmax + MatMul)
     // Compile args: RingSize, BlockTiles
-    float softmax_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    uint32_t scale_bits;
-    std::memcpy(&scale_bits, &softmax_scale, sizeof(softmax_scale));
-
     std::vector<uint32_t> compute_compile_args = {
         (uint32_t)ring_size,
         (uint32_t)St,
@@ -232,7 +254,7 @@ void RunRingSDPA(
 
     auto compute_kernel = CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/compute_sdpa.cpp",
+        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/compute/compute_sdpa.cpp",
         core_grid,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi4,

@@ -1,7 +1,20 @@
 #include <stdint.h>
 #include "dataflow_api.h"
+#include "generate_bcast_scalar.hpp"
+#include "generate_reduce_scaler.hpp"
 
 void kernel_main() {
+    constexpr uint32_t identity_scalar_packed = get_compile_time_arg_val(0);
+    constexpr uint32_t scale_val = get_compile_time_arg_val(1);
+
+    constexpr uint32_t cb_reduce_scale_in = tt::CBIndex::c_6;
+    constexpr uint32_t cb_scale_in = tt::CBIndex::c_7;
+    constexpr uint32_t cb_col_identity = tt::CBIndex::c_8;
+
+    generate_reduce_scaler(cb_reduce_scale_in, identity_scalar_packed);
+    generate_bcast_unary_scalar(cb_scale_in, scale_val);
+    generate_bcast_col_scalar(cb_col_identity, identity_scalar_packed);
+
     // Logic: Wait for Compute to produce output, then write to global memory.
     
     // Args

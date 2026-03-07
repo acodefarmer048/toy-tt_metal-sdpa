@@ -1,7 +1,6 @@
 #include <stdint.h>
 #include "dataflow_api.h"
 #include "hostdevcommon/common_values.hpp"
-#include "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/generate_reduce_scaler.hpp"
 
 void kernel_main() {
     // 1. Args (DRAM Addresses)
@@ -19,13 +18,8 @@ void kernel_main() {
     uint32_t receiver_sem_addr = get_semaphore(get_arg_val<uint32_t>(10));
 
     // Compile time args
-    constexpr uint32_t packed_scaler_val = get_compile_time_arg_val(0);
-    constexpr uint32_t block_tiles = get_compile_time_arg_val(1);
-    constexpr uint32_t tile_bytes = get_compile_time_arg_val(2);
-
-    // Generate Scaler
-    constexpr uint32_t cb_scaler = tt::CBIndex::c_3;
-    generate_reduce_scaler(cb_scaler, packed_scaler_val);
+    constexpr uint32_t block_tiles = get_compile_time_arg_val(0);
+    constexpr uint32_t tile_bytes = get_compile_time_arg_val(1);
 
     // CB Allocations
     constexpr uint32_t cb_q = tt::CBIndex::c_0;

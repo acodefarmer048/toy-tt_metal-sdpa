@@ -12,11 +12,13 @@ void MAIN {
     constexpr uint32_t DHt = get_compile_time_arg_val(3);
     constexpr uint32_t scale_fp32_bits = get_compile_time_arg_val(4);
 
-    constexpr uint32_t cb_q = tt::CBIndex::c_0;
-    constexpr uint32_t cb_k_slots[2] = {tt::CBIndex::c_1, tt::CBIndex::c_4};
-    constexpr uint32_t cb_v_slots[2] = {tt::CBIndex::c_2, tt::CBIndex::c_5};
-    constexpr uint32_t cb_identity = tt::CBIndex::c_3;   // reduce scaler
-    constexpr uint32_t cb_out = tt::CBIndex::c_16;
+	constexpr uint32_t cb_q = tt::CBIndex::c_0;
+	constexpr uint32_t cb_k_slots[2] = {tt::CBIndex::c_1, tt::CBIndex::c_4};
+	constexpr uint32_t cb_v_slots[2] = {tt::CBIndex::c_2, tt::CBIndex::c_5};
+	constexpr uint32_t cb_reduce_scale_in = tt::CBIndex::c_6;
+	constexpr uint32_t cb_scale_in = tt::CBIndex::c_7;
+	constexpr uint32_t cb_col_identity = tt::CBIndex::c_8;
+	constexpr uint32_t cb_out = tt::CBIndex::c_16;
     constexpr uint32_t cb_qk_im = tt::CBIndex::c_24;
     constexpr uint32_t cb_mm2_prev = tt::CBIndex::c_25;
     constexpr uint32_t cb_mm2_cur = tt::CBIndex::c_26;
@@ -76,7 +78,7 @@ void MAIN {
                 reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, Sk_chunk_t>(
                     alias_cur_max, alias_prev_max, k_chunk > iter_k_chunk_start);
 		 */
-        reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity, Sq_chunk_t, Sk_chunk_t>(
+		reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_reduce_scale_in, Sq_chunk_t, Sk_chunk_t>(
             alias_cur_max, alias_prev_max, !first_block);
 
 		/**
@@ -150,7 +152,7 @@ void MAIN {
 	log_block(alias_prev_sum, alias_cur_max, Sq_chunk_t);
 
 	// Scale prev_max by scale_fp32
-	mul_block_bcast_scalar_inplace<cb_identity, Sq_chunk_t>(alias_prev_max);
+	mul_block_bcast_scalar_inplace<cb_scale_in, Sq_chunk_t>(alias_prev_max);
 	add_block_inplace(alias_prev_max, alias_cur_max, Sq_chunk_t);
 
 	/* cb_cur_sum = 1.0 / cb_cur_sum */
