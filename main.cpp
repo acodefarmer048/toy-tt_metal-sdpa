@@ -153,9 +153,9 @@ int main(int argc, char** argv) {
 	// problem parameter
     uint32_t batch = 1;
     // Per Core Chunk: SeqLen=128 (4 tiles), 
-    uint32_t seq_chunk_tiles = 4; // S_core / 32
+    uint32_t seq_chunk_tiles = 1; // S_core / 32
     uint32_t num_heads = num_rows;   // One head per row
-    uint32_t head_dim_tiles = 2;     // Head_dim / 32
+    uint32_t head_dim_tiles = 1;     // Head_dim / 32
     uint32_t seq_len_per_core = seq_chunk_tiles * tile_size; // 128
     uint32_t head_dim = head_dim_tiles * tile_size;          // 64
     uint32_t total_seq_len = seq_len_per_core * ring_size;    // Seq Len scales with Ring Size

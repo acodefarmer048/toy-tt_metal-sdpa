@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "dataflow_api.h"
 #include "hostdevcommon/common_values.hpp"
+#include "debug/dprint.h"
 
 void kernel_main() {
     // 1. Args (DRAM Addresses)
@@ -95,25 +96,31 @@ void kernel_main() {
     }
     noc_async_read_barrier();
     cb_push_back(cb_q, block_tiles);
+	DPRINT << "first data is ready in dataflow_reader, start_tile_idx=" << start_tile_id << ENDL();
 
 
     // Step 0 Data is ready in "Slot" (CB). Signal Next Core to receive
     noc_semaphore_inc(post_receiver_sem_noc, 1);
+	DPRINT << "signal post receiver" << ENDL();
 
     // 3. Ring Loop (Steps 1 to N-1)
     for (uint32_t step = 1; step < num_cores; ++step) {
+		DPRINT << "step=" << step << ENDL();
         // A. Wait for previous core to publish the next hop (ring order)
         noc_semaphore_wait(my_receiver_sem_addr_ptr, step);
+		DPRINT << "wait for prev core to publish [step] data" << ENDL();
 
         // B. Wait for downstream neighbor to finish consuming the slot we're about to overwrite
 		// modified from step to step-1
         noc_semaphore_wait(my_sender_sem_addr_ptr, step-1);
+		DPRINT << "wait for post core to finish consuming [step-1] data" << ENDL();
 
         uint32_t read_parity = (step - 1) & 0x1;
         uint32_t write_parity = step & 0x1;
 
 		cb_push_back(cb_k_slots[read_parity], block_tiles); 
 		cb_push_back(cb_v_slots[read_parity], block_tiles); 
+		DPRINT << "[step] K/V block is pushed to compute kernel" << ENDL();
 		// as downstream neighbor have received the slot, compute_sdpa could go on;
 
         uint64_t prev_k_noc_addr = get_noc_addr(prev_core_x, prev_core_y, remote_slot_addr_k[read_parity]);
@@ -139,13 +146,16 @@ void kernel_main() {
 
         // C. Acknowledge to previous core that its buffer slot can be reused
         noc_semaphore_inc(prev_sender_sem_noc, 1);
+		DPRINT << "acknowledge to prev core that [step] data is consumed" << ENDL();
 
         // D. Signal next core that a new block is ready in this slot
         noc_semaphore_inc(post_receiver_sem_noc, 1);
+		DPRINT << "acknowledge to post core that [step+1] data is ready" << ENDL();
     }
 	// last K/V block, as we donnot forward it to downstream neighbor, push it back at once
 	cb_push_back(cb_k_slots[(num_cores-1)&0x1], block_tiles); 
 	cb_push_back(cb_v_slots[(num_cores-1)&0x1], block_tiles); 
+	DPRINT << "last K/V block" << ENDL();
 }
 
 
