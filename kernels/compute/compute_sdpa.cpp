@@ -52,9 +52,10 @@ void MAIN {
         uint32_t parity = step & 0x1;
         uint32_t cb_k_cur = cb_k_slots[parity];
         uint32_t cb_v_cur = cb_v_slots[parity];
-		DPRINT << "entered compute main loop step=" << step << ENDL();
+		// DPRINT << "entered compute main loop step=" << step << ENDL();
 
 		mm_init(cb_q, cb_k_cur, cb_qk_im);
+		DPRINT << "wait for [" << step << "] K block in cb"  << ENDL();
         cb_wait_front(cb_k_cur, kv_chunk_tiles);
 
 		matmul_blocks(
@@ -98,9 +99,11 @@ void MAIN {
 			template <uint32_t in0_cb, uint32_t rows, uint32_t cols, uint32_t scale_fp32>
 			void sub_exp_block_bcast_cols_inplace(uint32_t in1_cb, uint32_t reduce_cb) {
 		 */
-        // sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, Sk_chunk_t, scale_fp32_bits>(
-        //    alias_cur_max, alias_cur_sum);
 
+        sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, Sk_chunk_t, scale_fp32_bits>(
+            alias_cur_max, alias_cur_sum);
+
+		DPRINT << "wait for [" << step << "] V block in cb"  << ENDL();
         cb_wait_front(cb_v_cur, kv_chunk_tiles);
 		cb_wait_front(cb_qk_im, qk_chunk_tiles);
 		// OUT_IM = QK @ V_CHUNK 
@@ -120,9 +123,10 @@ void MAIN {
 			false );
 
 		cb_pop_front(cb_qk_im, qk_chunk_tiles);
+		DPRINT << "[" << step << "] K/V block is computed and consumed"  << ENDL();
         if (!first_block) {
 			/* cb_exp_max_diff = torch.exp(cb_prev_max - cb_cur_max) */
-            // sub_exp_block<scale_fp32_bits>(alias_prev_max, alias_cur_max, cb_exp_max_diff, Sq_chunk_t);
+            sub_exp_block<scale_fp32_bits>(alias_prev_max, alias_cur_max, cb_exp_max_diff, Sq_chunk_t);
 			cb_pop_front(alias_prev_max, Sq_chunk_t);
 			/* cb_prev_sum *= cb_exp_max_diff */
             mul_tiles_bcast_cols_inplace(alias_prev_sum, cb_exp_max_diff, Sq_chunk_t);
@@ -138,12 +142,13 @@ void MAIN {
         std::swap(alias_prev_out, alias_cur_out);
         first_block = false;
 
+		DPRINT << "LSE computation thing in [" << step << "]" << ENDL();
         // Finalize current iteration's contribution
         matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum);
-        // log_block(alias_prev_sum, alias_cur_max, Sq_chunk_t);
+        log_block(alias_prev_sum, alias_cur_max, Sq_chunk_t);
         mul_block_bcast_scalar_inplace<cb_scale_in, Sq_chunk_t>(alias_prev_max);
         add_block_inplace(alias_prev_max, alias_cur_max, Sq_chunk_t);
-        //recip_block_inplace(alias_prev_sum, Sq_chunk_t);
+        recip_block_inplace(alias_prev_sum, Sq_chunk_t);
         mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_prev_out, alias_prev_sum);
 
         if (step > 0) {
@@ -155,7 +160,7 @@ void MAIN {
             uint32_t alias_cur_out_block = alias_prev_out;
             uint32_t alias_sub = alias_cur_out;
 
-            // sigmoid_sub(alias_cur_lse, cb_lse_in, alias_sig, Sq_chunk_t);
+            sigmoid_sub(alias_cur_lse, cb_lse_in, alias_sig, Sq_chunk_t);
             sub_block(cb_prev_out, alias_cur_out_block, alias_sub, out_chunk_tiles);
             mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_sub, alias_sig);
             sub_block(cb_prev_out, alias_sub, cb_out, out_chunk_tiles);
@@ -163,7 +168,7 @@ void MAIN {
             cb_pop_front(alias_cur_out_block, out_chunk_tiles);
             cb_pop_front(alias_sub, out_chunk_tiles);
 
-            // logsigmoid_sub(cb_lse_in, alias_cur_lse, alias_sig, Sq_chunk_t);
+            logsigmoid_sub(cb_lse_in, alias_cur_lse, alias_sig, Sq_chunk_t);
             sub_block(cb_lse_in, alias_sig, cb_lse_out, Sq_chunk_t);
             cb_pop_front(alias_sig, Sq_chunk_t);
             cb_pop_front(alias_cur_lse, Sq_chunk_t);

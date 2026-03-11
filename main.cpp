@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
     uint32_t batch = 1;
     // Per Core Chunk: SeqLen=128 (4 tiles), 
     uint32_t seq_chunk_tiles = 1; // S_core / 32
-    uint32_t num_heads = num_rows;   // One head per row
+    uint32_t num_heads = 1; // num_rows otherwise, One head per row
     uint32_t head_dim_tiles = 1;     // Head_dim / 32
     uint32_t seq_len_per_core = seq_chunk_tiles * tile_size; // 128
     uint32_t head_dim = head_dim_tiles * tile_size;          // 64
@@ -166,6 +166,7 @@ int main(int argc, char** argv) {
     std::cout << "  Heads: " << num_heads << std::endl;
     std::cout << "  SeqLen: " << total_seq_len << " (" << seq_len_per_core << " per core)" << std::endl;
     std::cout << "  HeadDim: " << head_dim << std::endl;
+    std::cout << "  Ring size: " << num_cols << std::endl;
     
     // Global Shape: [1, NumHeads, SeqLen, HeadDim]
     Shape global_shape({batch, num_heads, total_seq_len, head_dim});
@@ -237,6 +238,7 @@ int main(int argc, char** argv) {
         LSE_tensor,
         ring_size,  
 		head_dim,
+		num_heads,
 		seq_chunk_tiles
     );
     

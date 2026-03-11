@@ -88,6 +88,9 @@ void kernel_main() {
     uint64_t prev_sender_sem_noc = get_noc_addr(prev_core_x, prev_core_y, sender_sem_addr);
     uint64_t post_receiver_sem_noc = get_noc_addr(post_core_x, post_core_y, receiver_sem_addr);
 
+	// set it to 0
+    noc_semaphore_set(my_sender_sem_addr_ptr, 0);
+    noc_semaphore_set(my_receiver_sem_addr_ptr, 0);
     // Load Q -> Compute CB (Q is static)
     cb_reserve_back(cb_q, block_tiles);
     uint32_t wr_ptr_q = get_write_ptr(cb_q);
@@ -105,22 +108,28 @@ void kernel_main() {
 
     // 3. Ring Loop (Steps 1 to N-1)
     for (uint32_t step = 1; step < num_cores; ++step) {
-		DPRINT << "step=" << step << ENDL();
         // A. Wait for previous core to publish the next hop (ring order)
+		DPRINT << "wait for prev core to publish [" << step << "] data" << ENDL();
         noc_semaphore_wait(my_receiver_sem_addr_ptr, step);
-		DPRINT << "wait for prev core to publish [step] data" << ENDL();
 
+		// DPRINT << "my_receiver_sem_addr = "<< *my_receiver_sem_addr_ptr << ENDL();
         // B. Wait for downstream neighbor to finish consuming the slot we're about to overwrite
 		// modified from step to step-1
-        noc_semaphore_wait(my_sender_sem_addr_ptr, step-1);
-		DPRINT << "wait for post core to finish consuming [step-1] data" << ENDL();
+		if (step > 1) {
+			DPRINT << "wait for post core to finish consuming [" << step-2 << "] data" << ENDL();
+			noc_semaphore_wait(my_sender_sem_addr_ptr, step-1);
+		}
 
         uint32_t read_parity = (step - 1) & 0x1;
         uint32_t write_parity = step & 0x1;
+		DPRINT << "ready to go on K/V read" << ENDL();
 
 		cb_push_back(cb_k_slots[read_parity], block_tiles); 
 		cb_push_back(cb_v_slots[read_parity], block_tiles); 
-		DPRINT << "[step] K/V block is pushed to compute kernel" << ENDL();
+		DPRINT << "[" << step-1 << "] K/V block is pushed to compute kernel" << ENDL();
+        // C. Acknowledge to previous core that its buffer slot can be reused
+        noc_semaphore_inc(prev_sender_sem_noc, 1);
+		DPRINT << "acknowledge to prev core that [" << step-1 << "] data is consumed" << ENDL();
 		// as downstream neighbor have received the slot, compute_sdpa could go on;
 
         uint64_t prev_k_noc_addr = get_noc_addr(prev_core_x, prev_core_y, remote_slot_addr_k[read_parity]);
@@ -132,6 +141,8 @@ void kernel_main() {
 
         cb_reserve_back(k_write_cb, block_tiles); // cooperate with cb_pop_front in compute_sdpa
         cb_reserve_back(v_write_cb, block_tiles); // cooperate with cb_pop_front in compute_sdpa
+												  //
+
         uint32_t my_wr_k = get_write_ptr(k_write_cb);
         uint32_t my_wr_v = get_write_ptr(v_write_cb);
 
@@ -144,13 +155,10 @@ void kernel_main() {
         // cb_push_back(k_write_cb, block_tiles);
         // cb_push_back(v_write_cb, block_tiles);
 
-        // C. Acknowledge to previous core that its buffer slot can be reused
-        noc_semaphore_inc(prev_sender_sem_noc, 1);
-		DPRINT << "acknowledge to prev core that [step] data is consumed" << ENDL();
 
         // D. Signal next core that a new block is ready in this slot
         noc_semaphore_inc(post_receiver_sem_noc, 1);
-		DPRINT << "acknowledge to post core that [step+1] data is ready" << ENDL();
+		DPRINT << "acknowledge to post core that [" << step << "] data is ready" << ENDL();
     }
 	// last K/V block, as we donnot forward it to downstream neighbor, push it back at once
 	cb_push_back(cb_k_slots[(num_cores-1)&0x1], block_tiles); 

@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "dataflow_api.h"
+#include "debug/dprint.h"
 #include "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/generate_bcast_scalar.hpp"
 #include "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/generate_reduce_scaler.hpp"
 
@@ -16,6 +17,7 @@ void kernel_main() {
     constexpr uint32_t cb_lse_in = tt::CBIndex::c_18;
     constexpr uint32_t cb_prev_out = tt::CBIndex::c_19;
 
+	DPRINT << "writer begin to generate scalar" << ENDL();
     generate_reduce_scaler(cb_reduce_scale_in, identity_scalar_packed);
     generate_bcast_unary_scalar(cb_scale_in, scale_val);
     generate_bcast_col_scalar(cb_col_identity, identity_scalar_packed);
@@ -48,6 +50,7 @@ void kernel_main() {
     uint32_t lse_start_tile_id = chunk_idx * lse_tiles;
 
     for (uint32_t step = 0; step < ring_size; ++step) {
+		DPRINT << "writer entered main loop step=" << step << ENDL();
         if (step > 0) {
             // Load previously written output into cb_prev_out for compute to consume
             cb_reserve_back(cb_prev_out, block_tiles);

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 
 using namespace tt;
 using namespace tt::tt_metal;
@@ -28,6 +29,7 @@ void RunRingSDPA(
     Tensor& LSE,
     uint32_t ring_size,
 	uint32_t head_dim,
+	uint32_t num_heads,
 	uint32_t seq_chunk_tiles
 ) {
 	distributed::MeshCommandQueue& cq = device->mesh_command_queue();
@@ -297,7 +299,8 @@ void RunRingSDPA(
     std::map<uint32_t, std::vector<CoreCoord>> rings; // Group by Y (Row) -> Vector of cores (Ring)
     
     for (const auto& core_range : core_grid.ranges()) {
-        for (auto y = core_range.start_coord.y; y <= core_range.end_coord.y; y++) {
+		// TODO we assume that num_heads is <= core_range.end_coor.y + 1
+        for (auto y = core_range.start_coord.y; y < num_heads && y <= core_range.end_coord.y; y++) {
             for (auto x = core_range.start_coord.x; x <= core_range.end_coord.x; x++) {
                 rings[y].push_back({x, y});
             }
@@ -311,7 +314,11 @@ void RunRingSDPA(
         std::sort(ring_cores.begin(), ring_cores.end(), [](const CoreCoord& a, const CoreCoord& b) {
             return a.x < b.x;
         });
-        
+		// delete, just show core ranges in a ring
+        for (auto& [x, y] : ring_cores) {
+			// (y, x), (row, col)
+			std::cout << "core: " << y << ", " << x << std::endl;
+		}
         
         for (uint32_t i = 0; i < ring_size; ++i) {
             CoreCoord core = ring_cores[i];
