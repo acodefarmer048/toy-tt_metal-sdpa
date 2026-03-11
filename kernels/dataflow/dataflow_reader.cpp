@@ -99,12 +99,12 @@ void kernel_main() {
     }
     noc_async_read_barrier();
     cb_push_back(cb_q, block_tiles);
-	DPRINT << "first data is ready in dataflow_reader, start_tile_idx=" << start_tile_id << ENDL();
+	// DPRINT << "first data is ready in dataflow_reader, start_tile_idx=" << start_tile_id << ENDL();
 
 
     // Step 0 Data is ready in "Slot" (CB). Signal Next Core to receive
     noc_semaphore_inc(post_receiver_sem_noc, 1);
-	DPRINT << "signal post receiver" << ENDL();
+	// DPRINT << "signal post receiver" << ENDL();
 
     // 3. Ring Loop (Steps 1 to N-1)
     for (uint32_t step = 1; step < num_cores; ++step) {
@@ -122,7 +122,7 @@ void kernel_main() {
 
         uint32_t read_parity = (step - 1) & 0x1;
         uint32_t write_parity = step & 0x1;
-		DPRINT << "ready to go on K/V read" << ENDL();
+		// DPRINT << "ready to go on K/V read" << ENDL();
 
 		cb_push_back(cb_k_slots[read_parity], block_tiles); 
 		cb_push_back(cb_v_slots[read_parity], block_tiles); 
@@ -163,7 +163,7 @@ void kernel_main() {
 	// last K/V block, as we donnot forward it to downstream neighbor, push it back at once
 	cb_push_back(cb_k_slots[(num_cores-1)&0x1], block_tiles); 
 	cb_push_back(cb_v_slots[(num_cores-1)&0x1], block_tiles); 
-	DPRINT << "last K/V block" << ENDL();
+	// DPRINT << "last K/V block" << ENDL();
 }
 
 

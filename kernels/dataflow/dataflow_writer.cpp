@@ -17,7 +17,7 @@ void kernel_main() {
     constexpr uint32_t cb_lse_in = tt::CBIndex::c_18;
     constexpr uint32_t cb_prev_out = tt::CBIndex::c_19;
 
-	DPRINT << "writer begin to generate scalar" << ENDL();
+	// DPRINT << "writer begin to generate scalar" << ENDL();
     generate_reduce_scaler(cb_reduce_scale_in, identity_scalar_packed);
     generate_bcast_unary_scalar(cb_scale_in, scale_val);
     generate_bcast_col_scalar(cb_col_identity, identity_scalar_packed);
@@ -50,10 +50,12 @@ void kernel_main() {
     uint32_t lse_start_tile_id = chunk_idx * lse_tiles;
 
     for (uint32_t step = 0; step < ring_size; ++step) {
-		DPRINT << "writer entered main loop step=" << step << ENDL();
+		// DPRINT << "writer entered main loop step=" << step << ENDL();
         if (step > 0) {
             // Load previously written output into cb_prev_out for compute to consume
+			// DPRINT << "dataflow_writer waiting for cb_prev_out [" << step << "]" << ENDL();
             cb_reserve_back(cb_prev_out, block_tiles);
+			DPRINT << "dataflow_writer got cb_prev_out [" << step << "], now lets read prev_out from DRAM to cb" << ENDL();
             uint32_t prev_out_wr = get_write_ptr(cb_prev_out);
             for (uint32_t i = 0; i < block_tiles; ++i) {
                 noc_async_read_tile(out_start_tile_id + i, s_out, prev_out_wr + i * tile_bytes);
@@ -62,31 +64,41 @@ void kernel_main() {
             cb_push_back(cb_prev_out, block_tiles);
 
             // Load previous LSE into cb_lse_in
+			// DPRINT << "dataflow_writer waiting for cb_lse_in [" << step << "]" << ENDL();
             cb_reserve_back(cb_lse_in, lse_tiles);
+			DPRINT << "dataflow_writer got cb_lse_in [" << step << "], now lets read lse_in from DRAM to cb" << ENDL();
             uint32_t lse_in_wr = get_write_ptr(cb_lse_in);
             for (uint32_t i = 0; i < lse_tiles; ++i) {
                 noc_async_read_tile(lse_start_tile_id + i, s_lse, lse_in_wr + i * tile_bytes);
             }
             noc_async_read_barrier();
+
             cb_push_back(cb_lse_in, lse_tiles);
+			DPRINT << "dataflow_writer pushed cb_lse_in [" << step << "]" << ENDL();
         }
 
         // Wait for compute to produce normalized output
+		// DPRINT << "dataflow_writer waiting for cb_out [" << step << "]" << ENDL();
         cb_wait_front(cb_out, block_tiles);
+		DPRINT << "dataflow_writer got cb_out [" << step << "], now lets write cb_out" << ENDL();
         uint32_t out_read_ptr = get_read_ptr(cb_out);
         for (uint32_t i = 0; i < block_tiles; ++i) {
             noc_async_write_tile(out_start_tile_id + i, s_out, out_read_ptr + i * tile_bytes);
         }
         noc_async_write_barrier();
         cb_pop_front(cb_out, block_tiles);
+		DPRINT << "dataflow_writer poped out cb_out [" << step << "]" << ENDL();
 
         // Write the updated LSE block
+		// DPRINT << "dataflow_writer waiting for cb_lse_out [" << step << "]" << ENDL();
         cb_wait_front(cb_lse_out, lse_tiles);
+		DPRINT << "dataflow_writer got cb_lse_out [" << step << "], now lets write cb_lse_out" << ENDL();
         uint32_t lse_read_ptr = get_read_ptr(cb_lse_out);
         for (uint32_t i = 0; i < lse_tiles; ++i) {
             noc_async_write_tile(lse_start_tile_id + i, s_lse, lse_read_ptr + i * tile_bytes);
         }
         noc_async_write_barrier();
         cb_pop_front(cb_lse_out, lse_tiles);
+		DPRINT << "dataflow_writer poped out cb_lse_out [" << step << "]" << ENDL();
     }
 }
