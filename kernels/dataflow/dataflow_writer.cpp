@@ -8,7 +8,7 @@ void kernel_main() {
     constexpr uint32_t identity_scalar_packed = get_compile_time_arg_val(0);
     constexpr uint32_t scale_val = get_compile_time_arg_val(1);
     constexpr uint32_t block_tiles = get_compile_time_arg_val(2);
-    constexpr uint32_t lse_tiles = get_compile_time_arg_val(3);
+    constexpr uint32_t lse_tiles = get_compile_time_arg_val(3);  // St
     constexpr uint32_t tile_bytes = get_compile_time_arg_val(4);
 
     constexpr uint32_t cb_reduce_scale_in = tt::CBIndex::c_6;
@@ -55,18 +55,19 @@ void kernel_main() {
             // Load previously written output into cb_prev_out for compute to consume
 			// DPRINT << "dataflow_writer waiting for cb_prev_out [" << step << "]" << ENDL();
             cb_reserve_back(cb_prev_out, block_tiles);
-			DPRINT << "dataflow_writer got cb_prev_out [" << step << "], now lets read prev_out from DRAM to cb" << ENDL();
+			DPRINT << "dataflow_writer reserved free cb_prev_out [" << step << "], now lets read prev_out from DRAM to cb" << ENDL();
             uint32_t prev_out_wr = get_write_ptr(cb_prev_out);
             for (uint32_t i = 0; i < block_tiles; ++i) {
                 noc_async_read_tile(out_start_tile_id + i, s_out, prev_out_wr + i * tile_bytes);
             }
             noc_async_read_barrier();
             cb_push_back(cb_prev_out, block_tiles);
+			DPRINT << "dataflow_writer pushed cb_prev_out [" << step << "]" << ENDL();
 
             // Load previous LSE into cb_lse_in
 			// DPRINT << "dataflow_writer waiting for cb_lse_in [" << step << "]" << ENDL();
             cb_reserve_back(cb_lse_in, lse_tiles);
-			DPRINT << "dataflow_writer got cb_lse_in [" << step << "], now lets read lse_in from DRAM to cb" << ENDL();
+			DPRINT << "dataflow_writer reserved free cb_lse_in [" << step << "], now lets read lse_in from DRAM to cb" << ENDL();
             uint32_t lse_in_wr = get_write_ptr(cb_lse_in);
             for (uint32_t i = 0; i < lse_tiles; ++i) {
                 noc_async_read_tile(lse_start_tile_id + i, s_lse, lse_in_wr + i * tile_bytes);

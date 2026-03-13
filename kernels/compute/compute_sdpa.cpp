@@ -10,7 +10,7 @@ void MAIN {
     constexpr uint32_t Sq_chunk_t = get_compile_time_arg_val(1); // = S_t = seq_chunk_tiles
     constexpr uint32_t Sk_chunk_t = get_compile_time_arg_val(2); // = S_t = seq_chunk_tiles
     constexpr uint32_t DHt = get_compile_time_arg_val(3);
-    constexpr uint32_t scale_fp32_bits = get_compile_time_arg_val(4);
+    constexpr uint32_t scale_fp32= get_compile_time_arg_val(4);
 
     constexpr uint32_t cb_q = tt::CBIndex::c_0;
     constexpr uint32_t cb_k_slots[2] = {tt::CBIndex::c_1, tt::CBIndex::c_4};
@@ -108,7 +108,7 @@ void MAIN {
 		// Precondition: in1_cb has rows produced
 		// Postcondition: in0_cb has rows*cols produced
 		// Postcondition: in1_cb has rows produced
-        sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, Sk_chunk_t, scale_fp32_bits>(
+        sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, Sk_chunk_t, scale_fp32>(
             alias_cur_max, alias_cur_sum);
 
 		// DPRINT << "wait for [" << step << "] V block in cb"  << ENDL();
@@ -143,7 +143,7 @@ void MAIN {
 			// Precondition: in0_cb and in1_cb have num_tiles produced
 			// Postcondition: out_cb has num_tiles produced
 			// Postcondition: in0_cb and in1_cb has num_tiles produced
-            sub_exp_block<scale_fp32_bits>(alias_prev_max, alias_cur_max, cb_exp_max_diff, Sq_chunk_t);
+            sub_exp_block<scale_fp32>(alias_prev_max, alias_cur_max, cb_exp_max_diff, Sq_chunk_t);
 
 			cb_pop_front(alias_prev_max, Sq_chunk_t);
 			/* cb_prev_sum *= cb_exp_max_diff */
@@ -169,9 +169,9 @@ void MAIN {
 			// Postcondition: in0_cb empty
 			// Postcondition: in1_cb empty
 			// Postcondition: out_cb has rows*cols produced
-			 DPRINT << "compute waiting prev_out in [" << step << "]" << ENDL(); 
+			DPRINT << "compute waiting mm2_prev_out in [" << step << "]" << ENDL(); 
             mul_block_bcast_cols<Sq_chunk_t, DHt>(alias_mm2_prev_out, cb_exp_max_diff, alias_mm2_cur_out, true);
-			DPRINT << "compute got prev_out in [" << step << "]" << ENDL(); 
+			DPRINT << "compute got mm2_prev_out in [" << step << "]" << ENDL(); 
         }
 
         std::swap(alias_prev_sum, alias_cur_sum);
@@ -214,7 +214,7 @@ void MAIN {
 		// Precondition: in0_cb has rows*cols produced
 		// Precondition: in1_cb has rows produced
 		// Postcondition: in0_cb has rows*cols produced
-		// Postcondition: in1_cb has rows consumed
+		// Postcondition: in1_cb has rows produced, modified in my own version of compute_common.hpp
         mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_mm2_prev_out, alias_prev_sum);
 		// DPRINT << "compute finished mul_block_bcast_cols_inplace  in [" << step << "]" << ENDL();
 
@@ -232,22 +232,25 @@ void MAIN {
             mul_block_bcast_cols_inplace<Sq_chunk_t, DHt>(alias_sub, alias_sig);
             sub_block(cb_prev_out, alias_sub, cb_out, out_chunk_tiles);
             cb_pop_front(cb_prev_out, out_chunk_tiles);
-            cb_pop_front(alias_cur_out_block, out_chunk_tiles);
+            // cb_pop_front(alias_cur_out_block, out_chunk_tiles); // we need mm2_prev_out later
             cb_pop_front(alias_sub, out_chunk_tiles);
+            cb_pop_front(alias_sig, out_chunk_tiles);
 
             logsigmoid_sub(cb_lse_in, alias_cur_lse, alias_sig, Sq_chunk_t);
             sub_block(cb_lse_in, alias_sig, cb_lse_out, Sq_chunk_t);
             cb_pop_front(alias_sig, Sq_chunk_t);
-            cb_pop_front(alias_cur_lse, Sq_chunk_t);
+            // cb_pop_front(alias_cur_lse, Sq_chunk_t); // we need prev_max later
             cb_pop_front(cb_lse_in, Sq_chunk_t);
         } else {
-            // pack_reconfig_data_format(cb_out);
+            pack_reconfig_data_format(cb_out);
+            pack_reconfig_data_format(cb_lse_out);
 			// void copy_block(uint32_t in_cb, uint32_t out_cb, uint32_t num_tiles) {
 			// Precondition: in_cb has num_tiles produced
 			// Precondition: out_cb has num_tiles free
-			// Postcondition: in_cb has num_tiles consumed
+			// Postcondition: in_cb has num_tiles produced // modified in my own version of compute_common.hpp
 			// Postcondition: out_cb has num_tiles produced
             copy_block(alias_mm2_prev_out, cb_out, out_chunk_tiles);
+			// here dataflow_writer should got cb_out and write it to DRAM, then read it to cb_prev_out
 			// DPRINT <<"compute stuck waiting for prev_max when step=0" << ENDL();
             copy_block(alias_prev_max, cb_lse_out, Sq_chunk_t);
 			// DPRINT <<"compute got prev_max when step = 0" << ENDL();  // this is printed, we do got prev_max

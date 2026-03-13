@@ -204,11 +204,13 @@ void RunRingSDPA(
     // Prepare scalar values for kernel arguments
     bfloat16 bfloat_scaler_val(1.0f);
     uint32_t packed_scaler_val = pack_two_bfloat16_into_uint32({bfloat_scaler_val, bfloat_scaler_val});
-    float softmax_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-    uint32_t scale_bits;
-    std::memcpy(&scale_bits, &softmax_scale, sizeof(softmax_scale));
-    bfloat16 bfloat_scale_val(softmax_scale);
-    uint32_t packed_scale_val = pack_two_bfloat16_into_uint32({bfloat_scale_val, bfloat_scale_val});
+
+    union {
+        float f;
+        uint32_t u;
+    } scale_union{};
+    scale_union.f = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
 
     // 3. Semaphores
     // 我们需要信号量来同步 Ring 中的数据传输
@@ -244,7 +246,7 @@ void RunRingSDPA(
 
     std::vector<uint32_t> writer_compile_args = {
         packed_scaler_val,
-        packed_scale_val,
+        scale_union.u,
         block_tiles,
         St,
         tile_size_bytes
@@ -279,7 +281,7 @@ void RunRingSDPA(
         (uint32_t)St,
         (uint32_t)St,
         (uint32_t)DHt,
-        (uint32_t)scale_bits
+        scale_union.u
     };
 
     auto compute_kernel = CreateKernel(

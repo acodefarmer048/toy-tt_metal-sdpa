@@ -260,7 +260,8 @@ void mul_block_bcast_cols_inplace(uint32_t in0_cb, uint32_t in1_cb) {
             tile_regs_release();
         }
     }
-    cb_pop_front(in1_cb, rows);
+	// donot pop front for now, in compute_sdpa.cpp
+    // cb_pop_front(in1_cb, rows);
 }
 
 template <uint32_t in1_scalar_cb, uint32_t num_tiles>
@@ -382,7 +383,8 @@ void copy_block(uint32_t in_cb, uint32_t out_cb, uint32_t num_tiles) {
         cb_push_back(out_cb, 1);
         release_dst();
     }
-    cb_pop_front(in_cb, num_tiles);
+	// donot pop_front for now in comute_spda.cpp
+    // cb_pop_front(in_cb, num_tiles);
 }
 
 void log_block(uint32_t in_cb, uint32_t out_cb, uint32_t num_tiles) {
