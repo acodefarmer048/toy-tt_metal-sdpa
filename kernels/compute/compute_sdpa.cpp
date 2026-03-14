@@ -55,7 +55,7 @@ void MAIN {
 		// DPRINT << "entered compute main loop step=" << step << ENDL();
 
 		mm_init(cb_q, cb_k_cur, cb_qk_im);
-		// DPRINT << "wait for [" << step << "] K block in cb"  << ENDL();
+		DPRINT << "wait for [" << step << "] K block in cb"  << ENDL();
         cb_wait_front(cb_k_cur, kv_chunk_tiles);
 
 		matmul_blocks(
@@ -111,7 +111,7 @@ void MAIN {
         sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, Sk_chunk_t, scale_fp32>(
             alias_cur_max, alias_cur_sum);
 
-		// DPRINT << "wait for [" << step << "] V block in cb"  << ENDL();
+		DPRINT << "wait for [" << step << "] V block in cb"  << ENDL();
         cb_wait_front(cb_v_cur, kv_chunk_tiles);
 		cb_wait_front(cb_qk_im, qk_chunk_tiles);
 		// OUT_IM = QK @ V_CHUNK 
@@ -136,7 +136,7 @@ void MAIN {
 			false );
 
 		cb_pop_front(cb_qk_im, qk_chunk_tiles);
-		// DPRINT << "[" << step << "] K/V block is computed and consumed"  << ENDL();
+		DPRINT << "[" << step << "] K/V block is computed and consumed"  << ENDL();
         if (!first_block) {
 			/* cb_exp_max_diff = torch.exp(cb_prev_max - cb_cur_max) */
 			// void sub_exp_block(uint32_t in0_cb, uint32_t in1_cb, uint32_t out_cb, uint32_t num_tiles) {
