@@ -135,22 +135,22 @@ void kernel_main() {
 
         // Signal: Acknowledge to previous core that fetching is over
         noc_semaphore_inc(prev_sender_sem_noc, 1);
-		DPRINT << "acknowledge to prev core that we've got [" << step << "] data" << ENDL();
+		// DPRINT << "acknowledge to prev core that we've got [" << step << "] data" << ENDL();
 
         // Signal: Acknowledge to next core that a new block is ready in this slot
         noc_semaphore_inc(post_receiver_sem_noc, 1);
-		DPRINT << "acknowledge to post core that [" << step << "] data is ready" << ENDL();
+		// DPRINT << "acknowledge to post core that [" << step << "] data is ready" << ENDL();
 
 		// DPRINT << "my_receiver_sem_addr = "<< *my_receiver_sem_addr_ptr << ENDL();
         // Signal: Wait for downstream neighbor to finish fetching the data that we're about to consume
 		// step-1 for local, step for post node
-		DPRINT << "wait for post core to finish fetching [" << step-1 << "] data" << ENDL();
+		// DPRINT << "wait for post core to finish fetching [" << step-1 << "] data" << ENDL();
 		noc_semaphore_wait_min(my_sender_sem_addr_ptr, step);
 
 		// Action 2: Push back data we're about to consume
 		cb_push_back(cb_k_slots[read_parity], block_tiles); 
 		cb_push_back(cb_v_slots[read_parity], block_tiles); 
-		DPRINT << "[" << step-1 << "] K/V block is pushed to compute kernel" << ENDL();
+		// DPRINT << "[" << step-1 << "] K/V block is pushed to compute kernel" << ENDL();
 		// End of Action 2: copmute_sdpa is running on
 
     }

@@ -111,7 +111,7 @@ void MAIN {
         sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, Sk_chunk_t, scale_fp32>(
             alias_cur_max, alias_cur_sum);
 
-		DPRINT << "wait for [" << step << "] V block in cb"  << ENDL();
+		// DPRINT << "wait for [" << step << "] V block in cb"  << ENDL();
         cb_wait_front(cb_v_cur, kv_chunk_tiles);
 		cb_wait_front(cb_qk_im, qk_chunk_tiles);
 		// OUT_IM = QK @ V_CHUNK 
@@ -136,7 +136,7 @@ void MAIN {
 			false );
 
 		cb_pop_front(cb_qk_im, qk_chunk_tiles);
-		DPRINT << "[" << step << "] K/V block is computed and consumed"  << ENDL();
+		// DPRINT << "[" << step << "] K/V block is computed and consumed"  << ENDL();
         if (!first_block) {
 			/* cb_exp_max_diff = torch.exp(cb_prev_max - cb_cur_max) */
 			// void sub_exp_block(uint32_t in0_cb, uint32_t in1_cb, uint32_t out_cb, uint32_t num_tiles) {
@@ -153,7 +153,7 @@ void MAIN {
 			// Postcondition: in1_cb has num_tiles produced
             mul_tiles_bcast_cols_inplace(alias_prev_sum, cb_exp_max_diff, Sq_chunk_t);
 
-			DPRINT << "compute got prev_sum and prev_max in [" << step << "]" << ENDL(); // yes we got in step=1
+			// DPRINT << "compute got prev_sum and prev_max in [" << step << "]" << ENDL(); // yes we got in step=1
 			/* cb_cur_sum += cb_prev_sum */
 			// void add_block_inplace(uint32_t in0_cb, uint32_t in1_cb, uint32_t num_tiles) {
 			// Precondition: in0_cb and in1_cb have num_tiles produced
@@ -169,9 +169,9 @@ void MAIN {
 			// Postcondition: in0_cb empty
 			// Postcondition: in1_cb empty
 			// Postcondition: out_cb has rows*cols produced
-			DPRINT << "compute waiting mm2_prev_out in [" << step << "]" << ENDL(); 
+			// DPRINT << "compute waiting mm2_prev_out in [" << step << "]" << ENDL(); 
             mul_block_bcast_cols<Sq_chunk_t, DHt>(alias_mm2_prev_out, cb_exp_max_diff, alias_mm2_cur_out, true);
-			DPRINT << "compute got mm2_prev_out in [" << step << "]" << ENDL(); 
+			// DPRINT << "compute got mm2_prev_out in [" << step << "]" << ENDL(); 
         }
 
         std::swap(alias_prev_sum, alias_cur_sum);
@@ -188,7 +188,7 @@ void MAIN {
 		// postcondition: out_cb has M*N produced
 		// DPRINT << "compute waiting for cb_col_identity in [" << step << "]"  << ENDL();
         matmul_reduce<Sq_chunk_t>(cb_col_identity, alias_prev_sum); // cb_col_identity is empty
-		DPRINT << "compute got cb_col_identity in [" << step << "]" << ENDL();
+		// DPRINT << "compute got cb_col_identity in [" << step << "]" << ENDL();
         log_block(alias_prev_sum, alias_cur_max, Sq_chunk_t);
 		// DPRINT << "compute finisehd log_block in [" << step << "]" << ENDL();
 		// template <uint32_t in1_scalar_cb, uint32_t num_tiles>
