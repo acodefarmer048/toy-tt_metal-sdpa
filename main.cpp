@@ -145,9 +145,6 @@ int main(int argc, char** argv) {
     std::cout << "Using Device Grid: " << num_rows << " Rows (Heads) x " << num_cols << " Cols (Ring Size)" << std::endl;
 
 
-    // Core Grid corresponding to Full Device
-    CoreRange core_range({0, 0}, {num_cols - 1, num_rows - 1});
-    CoreRangeSet core_set({core_range});
     
     uint32_t tile_size = 32;
 	uint32_t ring_size = num_cols;
@@ -156,13 +153,18 @@ int main(int argc, char** argv) {
     uint32_t batch = 1;
     // Per Core Chunk: SeqLen=128 (4 tiles), 
     uint32_t seq_chunk_tiles = 1; // S_core / 32
-    uint32_t num_heads = 1; // num_rows otherwise, One head per row
+    uint32_t num_heads = num_rows; // num_rows otherwise, One head per row
     uint32_t head_dim_tiles = 1;     // Head_dim / 32
     uint32_t seq_len_per_core = seq_chunk_tiles * tile_size; // 128
     uint32_t head_dim = head_dim_tiles * tile_size;          // 64
     uint32_t total_seq_len = seq_len_per_core * ring_size;    // Seq Len scales with Ring Size
     uint32_t total_elements = batch * num_heads * total_seq_len * head_dim;
     
+    // Core Grid corresponding to Full Device
+    CoreRange core_range({0, 0}, {num_cols - 1, num_heads - 1});
+    CoreRangeSet core_set({core_range});
+	assert(num_rows >= num_heads 
+			&& "num_heads must be equal or less than num_rows of device available cores");
     std::cout << "Problem Config:" << std::endl;
     std::cout << "  Batch: " << batch << std::endl;
     std::cout << "  Heads: " << num_heads << std::endl;
@@ -234,16 +236,15 @@ int main(int argc, char** argv) {
     Program program = CreateProgram();
 
     simple_sdpa::RunRingSDPA(
-        mesh_device,
+		mesh_device,
 		program,
-        Q_tensor,
-        K_tensor,
-        V_tensor,
-        Out_tensor,
-        LSE_tensor,
-        ring_size,  
+		Q_tensor,
+		K_tensor,
+		V_tensor,
+		Out_tensor,
+		LSE_tensor,
+		ring_size,  
 		head_dim,
-		num_heads,
 		seq_chunk_tiles
     );
     // 6. execute (block until completion so host reads see final results)

@@ -255,7 +255,7 @@ void MAIN {
             copy_block(alias_prev_max, cb_lse_out, Sq_chunk_t);
 			// DPRINT <<"compute got prev_max when step = 0" << ENDL();  // this is printed, we do got prev_max
         }
-		DPRINT << "end of step=" << step << ENDL();
+		// DPRINT << "end of step=" << step << ENDL();
     }
 
     cb_pop_front(cb_q, q_chunk_tiles);
