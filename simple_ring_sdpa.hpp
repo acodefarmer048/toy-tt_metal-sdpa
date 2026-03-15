@@ -1,6 +1,7 @@
 #pragma once
 
 #include <tt-metalium/host_api.hpp>
+#include <tt-metalium/distributed.hpp>
 #include "tensor.hpp" // Use local simplified Tensor
 
 namespace simple_sdpa {
@@ -9,6 +10,7 @@ namespace simple_sdpa {
 // Assumes tensors are on device and layout is correct (TILE)
 void RunRingSDPA(
     std::shared_ptr<tt::tt_metal::distributed::MeshDevice> device,
+	tt::tt_metal::Program& program,
     Tensor& Q,
     Tensor& K,
     Tensor& V,

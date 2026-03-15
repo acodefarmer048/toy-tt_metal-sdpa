@@ -95,6 +95,7 @@ std::vector<float> cpu_sdpa(
 // Helper to create an INTERLEAVED buffer on Mesh Device (replicated locally)
 // Also initializes it with data
 std::shared_ptr<distributed::MeshBuffer> create_and_init_mesh_buffer(
+	tt::tt_metal::distributed::MeshCommandQueue& cq,
     distributed::MeshDevice* mesh_device,
     uint32_t total_elements,
     uint32_t page_size,
@@ -119,7 +120,7 @@ std::shared_ptr<distributed::MeshBuffer> create_and_init_mesh_buffer(
     std::vector<uint32_t> packed_data = pack_float_to_uint32(initial_data);
     
     // Use Mesh Command Queue to write
-    distributed::EnqueueWriteMeshBuffer(mesh_device->mesh_command_queue(), mesh_buffer, packed_data, false);
+    distributed::EnqueueWriteMeshBuffer(cq, mesh_buffer, packed_data, false);
     
     return mesh_buffer;
 }
@@ -136,6 +137,7 @@ int main(int argc, char** argv) {
     // 1. Define Shapes based on Device Grid
     // Get the logical compute grid size
     CoreCoord grid_size = mesh_device->compute_with_storage_grid_size();
+	distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
     
     uint32_t num_rows = grid_size.y; // Heads = Number of Rows
     uint32_t num_cols = grid_size.x; // Ring Size = Number of Cols
@@ -199,14 +201,14 @@ int main(int argc, char** argv) {
     // Page size for Interleaved (Tile size)
     uint32_t page_size = 32 * 32 * 2; // 2048 bytes
     
-    auto Q_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, Q_host);
-    auto K_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, K_host);
-    auto V_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, V_host);
+    auto Q_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, Q_host);
+    auto K_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, K_host);
+    auto V_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, V_host);
     
     // Output & LSE Buffers (Empty)
     std::vector<float> zeros(total_elements, 0.0f);
-    auto Out_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, zeros);
-    auto LSE_mesh_buf = create_and_init_mesh_buffer(mesh_device.get(), total_elements, page_size, zeros);
+    auto Out_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, zeros);
+    auto LSE_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, zeros);
 
     // Extract Local Buffers from MeshBuffers
     // Use the aliasing constructor of shared_ptr to avoid double-freeing the buffer.
@@ -229,8 +231,11 @@ int main(int argc, char** argv) {
     
     auto start = std::chrono::high_resolution_clock::now();
     
+    Program program = CreateProgram();
+
     simple_sdpa::RunRingSDPA(
         mesh_device,
+		program,
         Q_tensor,
         K_tensor,
         V_tensor,
@@ -241,6 +246,11 @@ int main(int argc, char** argv) {
 		num_heads,
 		seq_chunk_tiles
     );
+    // 6. execute (block until completion so host reads see final results)
+	distributed::MeshWorkload workload;
+	distributed::MeshCoordinateRange device_range = distributed::MeshCoordinateRange(mesh_device->shape());
+	workload.add_program(device_range, std::move(program));
+	distributed::EnqueueMeshWorkload(cq, workload, /*blocking=*/true);
     
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
@@ -252,10 +262,9 @@ int main(int argc, char** argv) {
     // We allocate a vector of uint32_t to hold bfloat16 packed pairs
     std::vector<uint32_t> output_packed(total_elements / 2); // 2 bf16 per uint32
     
-    // Use Mesh Read
-    distributed::EnqueueReadMeshBuffer(mesh_device->mesh_command_queue(), output_packed, Out_mesh_buf, true);
     
     std::vector<float> output_device = unpack_uint32_to_float(output_packed);
+    distributed::EnqueueReadMeshBuffer(cq, output_packed, Out_mesh_buf, true);
     
     // 6. Run Reference CPU (Multi-Head)
     std::cout << "Running Reference CPU SDPA..." << std::endl;

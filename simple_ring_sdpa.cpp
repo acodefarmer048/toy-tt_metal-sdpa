@@ -1,7 +1,6 @@
 #include "simple_ring_sdpa.hpp"
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/constants.hpp>
-#include <tt-metalium/distributed.hpp>
 #include <tt-metalium/bfloat16.hpp>
 #include <tt-metalium/command_queue.hpp>
 
@@ -22,6 +21,7 @@ namespace simple_sdpa {
 
 void RunRingSDPA(
     std::shared_ptr<distributed::MeshDevice> device,
+	Program& program,
     Tensor& Q,
     Tensor& K,
     Tensor& V,
@@ -32,8 +32,6 @@ void RunRingSDPA(
 	uint32_t num_heads,
 	uint32_t seq_chunk_tiles
 ) {
-	distributed::MeshCommandQueue& cq = device->mesh_command_queue();
-    Program program = CreateProgram();
 
     // 1. Core Grid
     // 简单起见，我们假设 input_tensor 的 shard spec 已经决定了网格大小
@@ -376,12 +374,6 @@ void RunRingSDPA(
         ring_idx++;
     }
 
-    // 6. execute (block until completion so host reads see final results)
-	distributed::MeshWorkload workload;
-	distributed::MeshCoordinateRange device_range = distributed::MeshCoordinateRange(device->shape());
-	workload.add_program(device_range, std::move(program));
-	distributed::EnqueueMeshWorkload(cq, workload, /*blocking=*/false);
-	std::cout << "see if program exited" << std::endl;
 
 }
 
