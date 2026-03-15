@@ -380,7 +380,9 @@ void RunRingSDPA(
 	distributed::MeshWorkload workload;
 	distributed::MeshCoordinateRange device_range = distributed::MeshCoordinateRange(device->shape());
 	workload.add_program(device_range, std::move(program));
-	distributed::EnqueueMeshWorkload(cq, workload, /*blocking=*/true);
+	distributed::EnqueueMeshWorkload(cq, workload, /*blocking=*/false);
+	std::cout << "see if program exited" << std::endl;
+
 }
 
 } // namespace simple_sdpa

@@ -10,7 +10,7 @@ void kernel_main() {
     uint32_t v_addr = get_arg_val<uint32_t>(2);
     uint32_t start_tile_id = get_arg_val<uint32_t>(3); 
 
-    uint32_t num_cores = get_arg_val<uint32_t>(4);  // current ring size
+    uint32_t ring_size = get_arg_val<uint32_t>(4);  // current ring size
     uint32_t post_core_x = get_arg_val<uint32_t>(5);
     uint32_t post_core_y = get_arg_val<uint32_t>(6);
     uint32_t prev_core_x = get_arg_val<uint32_t>(7);
@@ -88,9 +88,6 @@ void kernel_main() {
     uint64_t prev_sender_sem_noc = get_noc_addr(prev_core_x, prev_core_y, sender_sem_addr);
     uint64_t post_receiver_sem_noc = get_noc_addr(post_core_x, post_core_y, receiver_sem_addr);
 
-	// set it to 0
-    // noc_semaphore_set(my_sender_sem_addr_ptr, 0);
-    // noc_semaphore_set(my_receiver_sem_addr_ptr, 0);
     // Load Q -> Compute CB (Q is static)
     cb_reserve_back(cb_q, block_tiles);
     uint32_t wr_ptr_q = get_write_ptr(cb_q);
@@ -107,10 +104,10 @@ void kernel_main() {
 	// DPRINT << "signal post receiver" << ENDL();
 
     // 3. Ring Loop (Steps 1 to N-1)
-    for (uint32_t step = 1; step < num_cores; ++step) {
+    for (uint32_t step = 1; step < ring_size; ++step) {
         // Signal: Wait for previous core to publish the next hop (ring order)
-		DPRINT << "wait for prev core to publish [" << step << "] data" << ENDL();
-        noc_semaphore_wait(my_receiver_sem_addr_ptr, step);
+		// DPRINT << "wait for prev core to publish [" << step << "] data" << ENDL();
+        noc_semaphore_wait_min(my_receiver_sem_addr_ptr, step);
 		// Action 1: Begin to read data from prev core
 		// precondition: prev core have published its data that we're about to fetch
 		// precondition: cb_reserve_back has got the desired space we're about to write
@@ -148,7 +145,7 @@ void kernel_main() {
         // Signal: Wait for downstream neighbor to finish fetching the data that we're about to consume
 		// step-1 for local, step for post node
 		DPRINT << "wait for post core to finish fetching [" << step-1 << "] data" << ENDL();
-		noc_semaphore_wait(my_sender_sem_addr_ptr, step);
+		noc_semaphore_wait_min(my_sender_sem_addr_ptr, step);
 
 		// Action 2: Push back data we're about to consume
 		cb_push_back(cb_k_slots[read_parity], block_tiles); 
@@ -158,9 +155,9 @@ void kernel_main() {
 
     }
 	// last K/V block, as we donnot forward it to downstream neighbor, push it back at once
-	cb_push_back(cb_k_slots[(num_cores-1)&0x1], block_tiles); 
-	cb_push_back(cb_v_slots[(num_cores-1)&0x1], block_tiles); 
-	// DPRINT << "last K/V block" << ENDL();
+	cb_push_back(cb_k_slots[(ring_size-1)&0x1], block_tiles); 
+	cb_push_back(cb_v_slots[(ring_size-1)&0x1], block_tiles); 
+	DPRINT << "end of data read" << ENDL();
 }
 
 

@@ -55,7 +55,7 @@ void MAIN {
 		// DPRINT << "entered compute main loop step=" << step << ENDL();
 
 		mm_init(cb_q, cb_k_cur, cb_qk_im);
-		DPRINT << "wait for [" << step << "] K block in cb"  << ENDL();
+		// DPRINT << "wait for [" << step << "] K block in cb"  << ENDL();
         cb_wait_front(cb_k_cur, kv_chunk_tiles);
 
 		matmul_blocks(
@@ -259,5 +259,6 @@ void MAIN {
     }
 
     cb_pop_front(cb_q, q_chunk_tiles);
+	DPRINT << "end of computation" << ENDL();
 }
 }

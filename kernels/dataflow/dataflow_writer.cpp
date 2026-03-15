@@ -55,7 +55,7 @@ void kernel_main() {
             // Load previously written output into cb_prev_out for compute to consume
 			// DPRINT << "dataflow_writer waiting for cb_prev_out [" << step << "]" << ENDL();
             cb_reserve_back(cb_prev_out, block_tiles);
-			DPRINT << "dataflow_writer reserved free cb_prev_out [" << step << "], now lets read prev_out from DRAM to cb" << ENDL();
+			// DPRINT << "dataflow_writer reserved free cb_prev_out [" << step << "], now lets read prev_out from DRAM to cb" << ENDL();
             uint32_t prev_out_wr = get_write_ptr(cb_prev_out);
             for (uint32_t i = 0; i < block_tiles; ++i) {
                 noc_async_read_tile(out_start_tile_id + i, s_out, prev_out_wr + i * tile_bytes);
@@ -102,4 +102,5 @@ void kernel_main() {
         cb_pop_front(cb_lse_out, lse_tiles);
 		DPRINT << "dataflow_writer poped out cb_lse_out [" << step << "]" << ENDL();
     }
+	DPRINT <<"end of data write" << ENDL();
 }
