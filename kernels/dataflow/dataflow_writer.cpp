@@ -1,8 +1,8 @@
 #include <stdint.h>
 #include "dataflow_api.h"
 #include "debug/dprint.h"
-#include "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/generate_bcast_scalar.hpp"
-#include "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/generate_reduce_scaler.hpp"
+#include "generate_bcast_scalar.hpp"
+#include "generate_reduce_scaler.hpp"
 
 void kernel_main() {
     constexpr uint32_t identity_scalar_packed = get_compile_time_arg_val(0);
