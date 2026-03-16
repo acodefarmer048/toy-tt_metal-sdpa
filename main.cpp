@@ -5,6 +5,7 @@
 #include <tt-metalium/command_queue.hpp>
 #include <tt-metalium/bfloat16.hpp>
 #include <tt-metalium/distributed.hpp>
+#include <tt-metalium/tilize_utils.hpp>
 #include <vector>
 #include <random>
 #include <cmath>
@@ -14,23 +15,41 @@
 using namespace tt::tt_metal;
 // using simple_sdpa::Tensor; // Avoid namespace pollution or conflict
 
-// Helper function to pack float vector to uint32 vector (packed bfloat16)
-std::vector<uint32_t> pack_float_to_uint32(const std::vector<float>& input) {
-    std::vector<bfloat16> bf16_vec(input.size());
-    for(size_t i=0; i<input.size(); ++i) {
-        bf16_vec[i] = bfloat16(input[i]);
+
+// Helper to convert unpacked tiles back to row-major floats per head
+std::vector<float> untilize_heads(const std::vector<bfloat16>& tiled,
+    uint32_t num_heads,
+    uint32_t seq_len,
+    uint32_t head_dim) {
+    uint32_t head_elems = seq_len * head_dim;
+    std::vector<float> result(tiled.size());
+    for (uint32_t h = 0; h < num_heads; ++h) {
+        size_t offset = static_cast<size_t>(h) * head_elems;
+        std::vector<bfloat16> head_tile(tiled.begin() + offset, tiled.begin() + offset + head_elems);
+        std::vector<bfloat16> head_rm = untilize_nfaces(head_tile, seq_len, head_dim);
+        for (uint32_t i = 0; i < head_elems; ++i) {
+            result[offset + i] = static_cast<float>(head_rm[i]);
+        }
     }
-    return pack_bfloat16_vec_into_uint32_vec(bf16_vec);
+    return result;
 }
 
-// Helper function to unpack uint32 vector to float vector
-std::vector<float> unpack_uint32_to_float(const std::vector<uint32_t>& input) {
-    std::vector<bfloat16> bf16_vec = unpack_uint32_vec_into_bfloat16_vec(input);
-    std::vector<float> float_vec(bf16_vec.size());
-    for(size_t i=0; i<bf16_vec.size(); ++i) {
-        float_vec[i] = static_cast<float>(bf16_vec[i]);
+std::vector<bfloat16> tilize_heads(const std::vector<float>& row_major,
+    uint32_t num_heads,
+    uint32_t seq_len,
+    uint32_t head_dim) {
+    uint32_t head_elems = seq_len * head_dim;
+    std::vector<bfloat16> tiled(row_major.size());
+    for (uint32_t h = 0; h < num_heads; ++h) {
+        size_t offset = static_cast<size_t>(h) * head_elems;
+        std::vector<bfloat16> head_rm(head_elems);
+        for (uint32_t i = 0; i < head_elems; ++i) {
+            head_rm[i] = bfloat16(row_major[offset + i]);
+        }
+        std::vector<bfloat16> head_tiled = tilize_nfaces(head_rm, seq_len, head_dim);
+        std::copy(head_tiled.begin(), head_tiled.end(), tiled.begin() + offset);
     }
-    return float_vec;
+    return tiled;
 }
 
 // Helper function to display matrix
@@ -95,13 +114,13 @@ std::vector<float> cpu_sdpa(
 // Helper to create an INTERLEAVED buffer on Mesh Device (replicated locally)
 // Also initializes it with data
 std::shared_ptr<distributed::MeshBuffer> create_and_init_mesh_buffer(
-	tt::tt_metal::distributed::MeshCommandQueue& cq,
+	 tt::tt_metal::distributed::MeshCommandQueue& cq,
     distributed::MeshDevice* mesh_device,
     uint32_t total_elements,
     uint32_t page_size,
-    const std::vector<float>& initial_data
+    const std::vector<bfloat16>& initial_data
 ) {
-    uint32_t total_bytes = total_elements * 2; // BFLOAT16 size
+    uint32_t total_bytes = total_elements * sizeof(bfloat16);
     
     // DRAM Config (Local to each device)
     distributed::DeviceLocalBufferConfig dram_config{
@@ -116,11 +135,8 @@ std::shared_ptr<distributed::MeshBuffer> create_and_init_mesh_buffer(
 
     auto mesh_buffer = distributed::MeshBuffer::create(buffer_config, dram_config, mesh_device);
     
-    // Write Data (Pack first)
-    std::vector<uint32_t> packed_data = pack_float_to_uint32(initial_data);
-    
-    // Use Mesh Command Queue to write
-    distributed::EnqueueWriteMeshBuffer(cq, mesh_buffer, packed_data, false);
+    // Use Mesh Command Queue to write bfloat16 tiles directly (already tilized)
+    distributed::EnqueueWriteMeshBuffer(cq, mesh_buffer, initial_data, false);
     
     return mesh_buffer;
 }
@@ -203,12 +219,16 @@ int main(int argc, char** argv) {
     // Page size for Interleaved (Tile size)
     uint32_t page_size = 32 * 32 * 2; // 2048 bytes
     
-    auto Q_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, Q_host);
-    auto K_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, K_host);
-    auto V_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, V_host);
+    auto Q_device_data = tilize_heads(Q_host, num_heads, total_seq_len, head_dim);
+    auto K_device_data = tilize_heads(K_host, num_heads, total_seq_len, head_dim);
+    auto V_device_data = tilize_heads(V_host, num_heads, total_seq_len, head_dim);
+
+    auto Q_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, Q_device_data);
+    auto K_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, K_device_data);
+    auto V_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, V_device_data);
     
     // Output & LSE Buffers (Empty)
-    std::vector<float> zeros(total_elements, 0.0f);
+    std::vector<bfloat16> zeros(total_elements, bfloat16(0.0f));
     auto Out_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, zeros);
     auto LSE_mesh_buf = create_and_init_mesh_buffer(cq, mesh_device.get(), total_elements, page_size, zeros);
 
@@ -244,7 +264,7 @@ int main(int argc, char** argv) {
 		Out_tensor,
 		LSE_tensor,
 		ring_size,  
-		head_dim,
+		head_dim_tiles,
 		seq_chunk_tiles
     );
     // 6. execute (block until completion so host reads see final results)
@@ -261,11 +281,9 @@ int main(int argc, char** argv) {
     std::cout << "Reading Output..." << std::endl;
     // Buffer size is total_bytes
     // We allocate a vector of uint32_t to hold bfloat16 packed pairs
-    std::vector<uint32_t> output_packed(total_elements / 2); // 2 bf16 per uint32
-    
-    
-    std::vector<float> output_device = unpack_uint32_to_float(output_packed);
-    distributed::EnqueueReadMeshBuffer(cq, output_packed, Out_mesh_buf, true);
+    std::vector<bfloat16> output_tiles(total_elements);
+    distributed::EnqueueReadMeshBuffer(cq, output_tiles, Out_mesh_buf, true);
+    std::vector<float> output_device = untilize_heads(output_tiles, num_heads, total_seq_len, head_dim);
     
     // 6. Run Reference CPU (Multi-Head)
     std::cout << "Running Reference CPU SDPA..." << std::endl;

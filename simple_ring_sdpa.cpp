@@ -28,7 +28,7 @@ void RunRingSDPA(
     Tensor& Output,
     Tensor& LSE,
     uint32_t ring_size,
-	uint32_t head_dim,
+	uint32_t head_dim_tiles,
 	uint32_t seq_chunk_tiles
 ) {
 
@@ -44,7 +44,7 @@ void RunRingSDPA(
     uint32_t datum_size_bytes = 2; // Bfloat16
     uint32_t tile_size_bytes = tile_pixels * datum_size_bytes;
 
-    uint32_t DHt = head_dim;       // Head Dimension (tiles)
+    uint32_t DHt = head_dim_tiles;       // Head Dimension (tiles)
     uint32_t St = seq_chunk_tiles;        // Sequence Chunk Size (tiles)
     uint32_t block_tiles = St * DHt; // Q 或 K 的一个 Chunk 包含多少个 tiles (4*2=8)
 
@@ -206,7 +206,7 @@ void RunRingSDPA(
         float f;
         uint32_t u;
     } scale_union{};
-    scale_union.f = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    scale_union.f = 1.0f / std::sqrt(static_cast<float>(head_dim_tiles * 32));
 
 
     // 3. Semaphores
@@ -335,7 +335,7 @@ void RunRingSDPA(
             // We assume Data is linearly packed:
             // [Ring 0 (Batch 0, Head 0) | Ring 1 (Batch 0, Head 1) | ...]
             // Inside Ring: [Chunk 0 | Chunk 1 | ...]
-            // Each Chunk = block_tiles = head_dim * seq_pre_core
+            // Each Chunk = block_tiles = head_dim_tiles * seq_pre_core
             // Total Offset = (RingIdx * RingSize + CoreIdxInRing) * block_tiles
             
             uint32_t global_chunk_idx = ring_idx * ring_size + i;
