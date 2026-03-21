@@ -1,6 +1,6 @@
 #include <stdint.h>
-#include "dataflow_api.h"
-#include "debug/dprint.h"
+#include "api/dataflow/dataflow_api.h"
+#include "api/debug/dprint.h"
 #include "generate_bcast_scalar.hpp"
 #include "generate_reduce_scaler.hpp"
 

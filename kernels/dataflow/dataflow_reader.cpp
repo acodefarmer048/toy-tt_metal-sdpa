@@ -1,7 +1,7 @@
 #include <stdint.h>
-#include "dataflow_api.h"
+#include "api/dataflow/dataflow_api.h"
 #include "hostdevcommon/common_values.hpp"
-#include "debug/dprint.h"
+#include "api/debug/dprint.h"
 
 void kernel_main() {
     // 1. Args (DRAM Addresses)

@@ -250,7 +250,7 @@ void RunRingSDPA(
 
     auto reader_kernel = CreateKernel(
         program,
-       OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow/dataflow_reader.cpp",
+       OVERRIDE_KERNEL_PREFIX "toy-tt_metal-sdpa/kernels/dataflow/dataflow_reader.cpp",
         core_grid,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
@@ -261,7 +261,7 @@ void RunRingSDPA(
 
     auto writer_kernel = CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/dataflow/dataflow_writer.cpp",
+        OVERRIDE_KERNEL_PREFIX "toy-tt_metal-sdpa/kernels/dataflow/dataflow_writer.cpp",
         core_grid,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
@@ -282,7 +282,7 @@ void RunRingSDPA(
 
     auto compute_kernel = CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/sdpa/kernels/compute/compute_sdpa.cpp",
+        OVERRIDE_KERNEL_PREFIX "toy-tt_metal-sdpa/kernels/compute/compute_sdpa.cpp",
         core_grid,
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi4,

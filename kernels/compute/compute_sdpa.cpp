@@ -1,11 +1,9 @@
 #include <algorithm>
 #include <cstdint>
-#include "compute_kernel_api.h"
-#include "debug/dprint.h"
+#include "api/debug/dprint.h"
 #include "compute_common.hpp"
 
-namespace NAMESPACE {
-void MAIN {
+void kernel_main() {
     constexpr uint32_t ring_size = get_compile_time_arg_val(0);
     constexpr uint32_t Sq_chunk_t = get_compile_time_arg_val(1); // = S_t = seq_chunk_tiles
     constexpr uint32_t Sk_chunk_t = get_compile_time_arg_val(2); // = S_t = seq_chunk_tiles
@@ -260,5 +258,4 @@ void MAIN {
 
     cb_pop_front(cb_q, q_chunk_tiles);
 	DPRINT << "end of computation" << ENDL();
-}
 }

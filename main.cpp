@@ -140,7 +140,7 @@ std::shared_ptr<distributed::MeshBuffer> create_and_init_mesh_buffer(
     return mesh_buffer;
 }
 
-int main(int argc, char** argv) {
+int main() {
     // 0. Init Device (Mesh Device: Unit Mesh)
     constexpr int device_id = 0;
     std::shared_ptr<distributed::MeshDevice> mesh_device = distributed::MeshDevice::create_unit_mesh(device_id);

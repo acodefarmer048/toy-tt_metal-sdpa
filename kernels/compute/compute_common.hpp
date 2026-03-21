@@ -8,16 +8,23 @@
 #define REDUCE_OP (PoolType::MAX)
 #define REDUCE_DIM (ReduceDim::REDUCE_ROW)
 
-#include "compute_kernel_api.h"
-#include "compute_kernel_api/eltwise_binary.h"
-#include "compute_kernel_api/eltwise_unary/exp.h"
-#include "compute_kernel_api/eltwise_unary/recip.h"
-#include "compute_kernel_api/eltwise_unary/softplus.h"
-#include "compute_kernel_api/eltwise_unary/negative.h"
-#include "compute_kernel_api/bcast.h"
-#include "compute_kernel_api/tile_move_copy.h"
-#include "compute_kernel_api/matmul.h"
-#include "compute_kernel_api/reduce.h"
+
+
+#include "api/debug/assert.h"
+#include "api/compute/compute_kernel_api.h"
+#include "api/compute/binary_max_min.h"
+#include "api/compute/eltwise_binary.h"
+#include "api/compute/eltwise_unary/exp.h"
+#include "api/compute/eltwise_unary/recip.h"
+#include "api/compute/eltwise_unary/softplus.h"
+#include "api/compute/eltwise_unary/negative.h"
+#include "api/compute/eltwise_unary/binop_with_scalar.h"
+#include "api/compute/bcast.h"
+#include "api/compute/tile_move_copy.h"
+#include "api/compute/matmul.h"
+#include "api/compute/reduce.h"
+#include "api/compute/reduce_custom.h"
+
 
 template <uint32_t num_tiles>
 
@@ -51,7 +58,7 @@ template <uint32_t num_tiles>
 void max_block_inplace(uint32_t in0, uint32_t in1) {
     // inputs come in full, outputs go out full
     copy_tile_to_dst_init_short(in0);
-    max_tile_init();
+    binary_max_tile_init();
 
     constexpr uint32_t dst_reg_0 = 0;
     constexpr uint32_t dst_reg_1 = 1;
@@ -61,7 +68,7 @@ void max_block_inplace(uint32_t in0, uint32_t in1) {
         acquire_dst();
         copy_tile(in0, i, dst_reg_0);
         copy_tile(in1, i, dst_reg_1);
-        max_tile(dst_reg_0, dst_reg_1, static_cast<int>(VectorMode::C));
+        binary_max_tile(dst_reg_0, dst_reg_1, static_cast<int>(VectorMode::C));
         pack_tile(dst_reg_0, in0);
         release_dst();
     }
@@ -84,7 +91,7 @@ void reduce_c(uint32_t out_cb, uint32_t prev_cb, bool do_eltwise_max = false) {
     cb_wait_front(in0_cb, num_tiles);
     cb_reserve_back(out_cb, rows);
 
-    max_tile_init();
+    binary_max_tile_init();
     constexpr uint32_t reduce_dst_idx = 0;
     constexpr uint32_t prev_max_dst_idx = 1;
 
@@ -98,7 +105,7 @@ void reduce_c(uint32_t out_cb, uint32_t prev_cb, bool do_eltwise_max = false) {
         if (do_eltwise_max) {
             copy_tile_to_dst_init_short(prev_cb);
             copy_tile(prev_cb, i, prev_max_dst_idx);
-            max_tile(reduce_dst_idx, prev_max_dst_idx, static_cast<int>(VectorMode::C));
+            binary_max_tile(reduce_dst_idx, prev_max_dst_idx, static_cast<int>(VectorMode::C));
         }
 
         pack_tile(reduce_dst_idx, out_cb);
@@ -403,48 +410,380 @@ void log_block(uint32_t in_cb, uint32_t out_cb, uint32_t num_tiles) {
     }
 }
 
+#ifdef TRISC_MATH
+/**
+ * recip_tile on only the columns 0:8 of a face
+ */
+template <bool legacy_compat = true>
+void calculate_recip_first_column() {
+    constexpr int ITERATIONS_HALF_FACE = 4;
+    if constexpr (legacy_compat) {
+        for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
+            sfpi::vFloat in = sfpi::dst_reg[0];
+            sfpi::vFloat out = ckernel::sfpu::_reciprocal_compat_<APPROX ? 2 : 3>(in);
+            // Note: negate check removed since in always >= 0.0
+            // v_if (in < 0.0)
+            // {
+            //     out = -out;
+            // }
+            // v_endif;
+            if constexpr (DST_ACCUM_MODE || APPROX) {
+                sfpi::dst_reg[0] = out;
+            } else {
+                sfpi::dst_reg[0] = sfpi::reinterpret<sfpi::vFloat>(float_to_fp16b(out, 0));
+            }
+            sfpi::dst_reg += 2;
+        }
+    } else {
+        for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
+            sfpi::vFloat in = sfpi::dst_reg[0];
+
+            if constexpr (APPROX) {
+                sfpi::dst_reg[0] = ckernel::sfpu::_sfpu_reciprocal_<0>(in);
+            } else {
+                if constexpr (DST_ACCUM_MODE) {
+                    sfpi::dst_reg[0] = ckernel::sfpu::_sfpu_reciprocal_<2>(in);
+                } else {
+                    sfpi::vFloat out = ckernel::sfpu::_sfpu_reciprocal_<1>(in);
+                    sfpi::dst_reg[0] = sfpi::reinterpret<sfpi::vFloat>(float_to_fp16b(out, 0));
+                }
+            }
+
+            sfpi::dst_reg += 2;
+        }
+    }
+}
+
+template <bool legacy_compat = true>
+void recip_tile_first_column(uint32_t idst) {
+    _llk_math_eltwise_unary_sfpu_params_<APPROX /*APPROXIMATE*/>(
+        calculate_recip_first_column<legacy_compat>, idst, (int)VectorMode::C);
+}
+#endif
+
+#if defined(TRISC_MATH) || defined(TRISC_PACK)
+
+constexpr auto bits = [](float x) constexpr { return __builtin_bit_cast(std::uint32_t, x); };
+constexpr auto lo16 = [](float x) constexpr { return static_cast<std::uint16_t>(bits(x) & 0xFFFFu); };
+constexpr auto hi16 = [](float x) constexpr { return static_cast<std::uint16_t>(bits(x) >> 16); };
+
+#ifdef ARCH_WORMHOLE
+#define ADDR_MOD_X ADDR_MOD_3
+#else
+#define ADDR_MOD_X ADDR_MOD_7
+#endif
+
+ALWI void INSERT_SFPNOP() {
+#ifdef ARCH_WORMHOLE
+    TTI_SFPNOP;
+#endif
+}
+
+template <bool USE_SFPARECIP_INSTR, int POLY_DEGREE>
+constexpr bool can_preload_ln2_constants() {
+#ifdef ARCH_WORMHOLE
+    return false;
+#else
+    return (USE_SFPARECIP_INSTR || POLY_DEGREE == 1 || POLY_DEGREE == 2);
+#endif
+}
+
+/**
+ * Computes exp(x) using polynomial approximation after range reduction.
+ *
+ * Scales by configured factor, then reduces to exp(r) * 2^k
+ * where r = x - k*ln(2). Uses either SFPARECIP instruction or multi-term polynomial (degree 1-4)
+ * to compute exp(r), then reconstructs full result via exponent manipulation,
+ * clamping the exponent to handle large positive or negative inputs.
+ *
+ * @tparam USE_SFPARECIP_INSTR Use hardware SFPARECIP instruction (true) or polynomial evaluation (false). Only
+ * supported on Blackhole.
+ * @tparam SCALE_EN Apply scaling factor from LREG to input values
+ * @tparam ITERATIONS Number of 32-element vectors to process per tile
+ * @tparam POLY_DEGREE Polynomial degree (1-4) when USE_SFPARECIP_INSTR=false; higher improves accuracy
+ * @tparam IS_FP32_DEST_ACC_EN Float32 accumulation to dest register enabled.
+ * @tparam SCALE_BF16 Bfloat16 scale factor represented as uint16_t.
+ */
+template <
+    bool SCALE_EN,
+    int ITERATIONS,
+    bool USE_SFPARECIP_INSTR,
+    int POLY_DEGREE,
+    bool IS_FP32_DEST_ACC_EN,
+    uint16_t SCALE_BF16>
+void calculate_exponential_polynomial() {
+    addr_mod_t{
+        .srca = {.incr = 0},
+        .srcb = {.incr = 0},
+        .dest = {.incr = 0},
+    }
+        .set(ADDR_MOD_7);
+
+    constexpr float LN2_RECIP = 1.44269504088896340736f;  // 1/ln(2)
+    constexpr float M_LN2 = -0.69314718055994530942f;     // -ln(2)
+
+    if constexpr (!USE_SFPARECIP_INSTR) {
+        static_assert(POLY_DEGREE >= 1 && POLY_DEGREE <= 4);
+
+        // Evaluate polynomial f(x) = c0 + c1 * x + c2 * x^2 + ... using Horner's method.
+        constexpr float c0 = (POLY_DEGREE == 1)   ? 1.03022936050163882354355235184958220293399209290987f
+                             : (POLY_DEGREE == 2) ? 0.999848792924395313327307061545061386175496934006f
+                             : (POLY_DEGREE == 3) ? 0.99992449655091231753798502608929170703152709521188f
+                                                  : 1.0000001510806179002040134468008959160576106495165f;
+        constexpr float c1 = (POLY_DEGREE == 1)   ? 1.0201394465967894800285756834161653337107187804001f
+                             : (POLY_DEGREE == 2) ? 1.01508760098521056684783640695492761469306929535975f
+                             : (POLY_DEGREE == 3) ? 0.99993960415029750534472970577402987498389428593233f
+                                                  : 0.99996228117047652035114096488703457970402030983204f;
+        constexpr float c2 = (POLY_DEGREE == 2)   ? 0.50628367056745568861842335616023694454759126020461f
+                             : (POLY_DEGREE == 3) ? 0.50502329058055065591138054839814880512001604099324f
+                                                  : 0.49998365704615426417337683145647067790385638465486f;
+        constexpr float c3 = (POLY_DEGREE == 3) ? 0.16817330195731531429790827442800245470170482723302f
+                                                : 0.16792157982882225102649214918047336097544632172075f;
+        constexpr float c4 = 4.1959439860014343843000081999668024587178974865521e-2;
+
+        // Load polynomial coefficients.
+        if constexpr (POLY_DEGREE >= 4) {
+            TTI_SFPLOADI(p_sfpu::LREG3, 0xA, lo16(c4));
+            TTI_SFPLOADI(p_sfpu::LREG3, 0x8, hi16(c4));
+        }
+        if constexpr (POLY_DEGREE >= 3) {
+            TTI_SFPLOADI(p_sfpu::LREG4, 0xA, lo16(c3));
+            TTI_SFPLOADI(p_sfpu::LREG4, 0x8, hi16(c3));
+        }
+        if constexpr (POLY_DEGREE >= 2) {
+            TTI_SFPLOADI(p_sfpu::LREG5, 0xA, lo16(c2));
+            TTI_SFPLOADI(p_sfpu::LREG5, 0x8, hi16(c2));
+        }
+        if constexpr (POLY_DEGREE >= 1) {
+            TTI_SFPLOADI(p_sfpu::LREG6, 0xA, lo16(c1));
+            TTI_SFPLOADI(p_sfpu::LREG6, 0x8, hi16(c1));
+            TTI_SFPLOADI(p_sfpu::LREG7, 0xA, lo16(c0));
+            TTI_SFPLOADI(p_sfpu::LREG7, 0x8, hi16(c0));
+        }
+    }
+
+    if constexpr (can_preload_ln2_constants<USE_SFPARECIP_INSTR, POLY_DEGREE>()) {
+        TTI_SFPLOADI(p_sfpu::LREG3, 0xA, lo16(LN2_RECIP));
+        TTI_SFPLOADI(p_sfpu::LREG3, 0x8, hi16(LN2_RECIP));
+        TTI_SFPLOADI(p_sfpu::LREG4, 0xA, lo16(M_LN2));
+        TTI_SFPLOADI(p_sfpu::LREG4, 0x8, hi16(M_LN2));
+    }
+
+    for (int d = 0; d < ITERATIONS; d++) {
+        // Load the input.
+        constexpr uint8_t input_type = IS_FP32_DEST_ACC_EN ? InstrModLoadStore::FP32 : InstrModLoadStore::FP16B;
+        TTI_SFPLOAD(p_sfpu::LREG2, input_type, ADDR_MOD_X, 0);
+
+        if constexpr (SCALE_EN) {
+            TTI_SFPLOADI(p_sfpu::LREG0, 0, SCALE_BF16);
+            TTI_SFPMAD(p_sfpu::LREG2, p_sfpu::LREG0, p_sfpu::LCONST_0, p_sfpu::LREG2, 0);
+            INSERT_SFPNOP();
+        }
+
+        // Multiply by 1/ln(2) and round.
+        if constexpr (can_preload_ln2_constants<USE_SFPARECIP_INSTR, POLY_DEGREE>()) {
+            TTI_SFPMAD(p_sfpu::LREG2, p_sfpu::LREG3, p_sfpu::LCONST_0, p_sfpu::LREG0, 0);
+        } else {
+            TTI_SFPLOADI(p_sfpu::LREG1, 0xA, lo16(LN2_RECIP));
+            TTI_SFPLOADI(p_sfpu::LREG1, 0x8, hi16(LN2_RECIP));
+            TTI_SFPMAD(p_sfpu::LREG2, p_sfpu::LREG1, p_sfpu::LCONST_0, p_sfpu::LREG0, 0);
+        }
+        INSERT_SFPNOP();
+        TTI_SFP_STOCH_RND(
+            0, 0, 0, p_sfpu::LREG0, p_sfpu::LREG1, sfpi::SFPSTOCHRND_MOD1_FP32_TO_INT8);  // Clamp to [-127,+127].
+        TTI_SFPCAST(p_sfpu::LREG1, p_sfpu::LREG1, 0);
+
+        if constexpr (USE_SFPARECIP_INSTR) {
+#ifdef ARCH_BLACKHOLE
+            // Calculate floor(x) by setting v=v-1 if v>u.
+            TTI_SFPGT(0, p_sfpu::LREG0, p_sfpu::LREG1, 1);                                    // SFPGT_MOD1_SET_CC
+            TTI_SFPMAD(p_sfpu::LCONST_1, p_sfpu::LREG1, p_sfpu::LCONST_1, p_sfpu::LREG1, 2);  // SFPMAD_MOD1_NEGATE_VC
+            TTI_SFPENCC(0, 0, 0, 0);
+
+            // Calculate exp(x - k*ln2).
+            TTI_SFPMAD(p_sfpu::LREG1, p_sfpu::LREG4, p_sfpu::LREG2, p_sfpu::LREG0, 0);
+            TTI_SFPARECIP(0, p_sfpu::LREG0, p_sfpu::LREG0, 2);
+#else
+            ASSERT(false);  // TTI_SFPARECIP instruction only supported on Blackhole".
+#endif
+        } else {
+            if constexpr (can_preload_ln2_constants<USE_SFPARECIP_INSTR, POLY_DEGREE>()) {
+                TTI_SFPMAD(p_sfpu::LREG1, p_sfpu::LREG4, p_sfpu::LREG2, p_sfpu::LREG0, 0);
+            } else {
+                TTI_SFPLOADI(p_sfpu::LREG0, 0xA, lo16(M_LN2));
+                TTI_SFPLOADI(p_sfpu::LREG0, 0x8, hi16(M_LN2));
+                TTI_SFPMAD(p_sfpu::LREG1, p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LREG0, 0);
+            }
+            INSERT_SFPNOP();
+
+            // Calculate polynomial.
+            if constexpr (POLY_DEGREE == 1) {
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG6, p_sfpu::LREG7, p_sfpu::LREG0, 0);
+            } else if constexpr (POLY_DEGREE == 2) {
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG5, p_sfpu::LREG6, p_sfpu::LREG2, 0);
+                INSERT_SFPNOP();
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LREG7, p_sfpu::LREG0, 0);
+            } else if constexpr (POLY_DEGREE == 3) {
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG4, p_sfpu::LREG5, p_sfpu::LREG2, 0);
+                INSERT_SFPNOP();
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LREG6, p_sfpu::LREG2, 0);
+                INSERT_SFPNOP();
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LREG7, p_sfpu::LREG0, 0);
+            } else {  // degree 4.
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG3, p_sfpu::LREG4, p_sfpu::LREG2, 0);
+                INSERT_SFPNOP();
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LREG5, p_sfpu::LREG2, 0);
+                INSERT_SFPNOP();
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LREG6, p_sfpu::LREG2, 0);
+                INSERT_SFPNOP();
+                TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LREG7, p_sfpu::LREG0, 0);
+            }
+            INSERT_SFPNOP();
+        }
+
+        // Multiply by 2^k.
+        TT_SFPADDI(0x42fe, p_sfpu::LREG1, 0);  // Add 127.
+        INSERT_SFPNOP();
+        TTI_SFP_STOCH_RND(0, 0, 0, p_sfpu::LREG1, p_sfpu::LREG2, sfpi::SFPSTOCHRND_MOD1_FP32_TO_UINT8);
+        TTI_SFPSETEXP(0, p_sfpu::LCONST_0, p_sfpu::LREG2, 0);
+        TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG2, p_sfpu::LCONST_0, p_sfpu::LREG2, 0);
+        INSERT_SFPNOP();
+
+        // Handle underflow: if k == 0, exp(x) = 0 (fixes -inf case).
+        TTI_SFPSETCC(0, p_sfpu::LREG1, 0, 6);  // Set LaneFlags = (LREG1 == 0) and enable CC.
+        TTI_SFPLOADI(p_sfpu::LREG2, 0, 0);     // LREG2 = 0 ONLY for lanes where LREG1 == 0.
+        TTI_SFPENCC(0, 0, 0, 0);               // Disable CC and clear LaneFlags - ALL lanes active again.
+
+        // Store the result.
+        if constexpr (!IS_FP32_DEST_ACC_EN) {
+            // LRegs work on float32 data. If DST is bfloat16 then SFPSTORE will truncate it
+            // so convert to bfloat16 using round-to-nearest-even.
+            TTI_SFP_STOCH_RND(0, 0, 0, p_sfpu::LREG2, p_sfpu::LREG2, sfpi::SFPSTOCHRND_MOD1_FP32_TO_FP16B);
+        }
+        TTI_SFPSTORE(p_sfpu::LREG2, input_type, ADDR_MOD_X, 0);
+        TTI_INCRWC(0, 4, 0, 0);  // Skip odd columns.
+    }
+}
+
+/**
+ * exp_tile on only the columns 0:8 of a face
+ */
+template <bool SDPA_EXP_APPROX_MODE, uint16_t scale_bf16>
+void calculate_exponential_first_column() {
+    constexpr int ITERATIONS_HALF_FACE = 4;
+    if constexpr (SDPA_EXP_APPROX_MODE) {
+        for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
+            sfpi::vFloat val = sfpi::dst_reg[0];
+            sfpi::vFloat result = ckernel::sfpu::
+                _calculate_exponential_piecewise_<EXP_APPROX_MODE, true /*SCALE_EN*/, true /*SKIP_POSITIVE_CHECK*/>(
+                    val, scale_bf16);
+            sfpi::dst_reg[0] = result;
+
+            // Stride by 2 to skip columns 8:16 of the face
+            sfpi::dst_reg += 2;
+        }
+    } else {
+        constexpr int polynomial_degree = DST_ACCUM_MODE ? 4 : 2;
+        calculate_exponential_polynomial<
+            true,
+            ITERATIONS_HALF_FACE,
+            false,
+            polynomial_degree,
+            DST_ACCUM_MODE,
+            scale_bf16>();
+    }
+}
+
+template <bool SDPA_EXP_APPROX_MODE, uint16_t scale_bf16>
+void exp_tile_first_column(uint32_t idst) {
+    _llk_math_eltwise_unary_sfpu_params_<false /*APPROXIMATE*/>(
+        calculate_exponential_first_column<SDPA_EXP_APPROX_MODE, scale_bf16>, idst, (int)VectorMode::C);
+}
+#endif  // defined(TRISC_MATH) || defined(TRISC_PACK)
 void sigmoid_sub(uint32_t in0_cb, uint32_t in1_cb, uint32_t out_cb, uint32_t num_tiles) {
     // out_cb = sigmoid(in0_cb - in1_cb)
-
+    /**
+     * sigmoid(x) is accurately implemented as 1 / (1 + exp(-x))
+     * This function manually implements the composite, accurate sigmoid.
+     *
+     * Each input tile has only the first column containing valid data, so VectorMode::C is a useful optimization.
+     */
     cb_wait_front(in0_cb, num_tiles);
     cb_wait_front(in1_cb, num_tiles);
     cb_reserve_back(out_cb, num_tiles);
     sub_tiles_init(in0_cb, in1_cb);
-    sigmoid_tile_init();
+    exp_tile_init<false, false>();
+    // recip_tile_init<false>(); // Can omit this because accurate exp_tile_init performs reduce_tile_init
 
     for (uint32_t i = 0; i < num_tiles; i++) {
         acquire_dst();
         sub_tiles(in0_cb, in1_cb, i, i, 0);
-        sigmoid_tile(0);
+        // exp_tile<false, false, true /*SCALE_EN*/>(0, (int)VectorMode::C, (uint16_t)0xBF80 /*bf16(-1.0) scale*/);
+        MATH((exp_tile_first_column<false /*APPROX_MODE*/, (uint16_t)0xBF80 /*bf16(-1.0) scale*/>(0)));
+        // add_unary_tile(0, 0x3F800000); // Call the LLK directly to get access to VectorMode argument
+        MATH((llk_math_eltwise_unary_sfpu_binop_with_scalar<APPROX, ADD_UNARY>(0, 0x3F800000, (int)VectorMode::C)));
+        // recip_tile<false>(0, (int)VectorMode::C);
+        MATH((recip_tile_first_column<false>(0)));
         pack_tile(0, out_cb);
         release_dst();
     }
     cb_push_back(out_cb, num_tiles);
 }
 
+#ifdef TRISC_MATH
+/**
+ * softplus_tile on only the columns 0:8 of a face
+ */
+template <bool SDPA_EXP_APPROX_MODE>
+void calculate_softplus_first_column(uint param0, uint param1, uint param2) {
+    constexpr int ITERATIONS_HALF_FACE = 4;
+    float beta = ckernel::sfpu::Converter::as_float(param0);
+    float beta_reciprocal = ckernel::sfpu::Converter::as_float(param1);
+    float threshold = ckernel::sfpu::Converter::as_float(param2);
+    for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
+        ckernel::sfpu::calculate_softplus_body<APPROX>(beta, beta_reciprocal, threshold);
+        sfpi::dst_reg += 2;
+    }
+}
+
+void softplus_tile_first_column(uint32_t idst, uint beta, uint beta_reciprocal, uint threshold) {
+    _llk_math_eltwise_unary_sfpu_params_<APPROX /*APPROXIMATE*/>(
+        calculate_softplus_first_column<APPROX>, idst, (int)VectorMode::C, beta, beta_reciprocal, threshold);
+}
+#endif
+
 void logsigmoid_sub(uint32_t in0_cb, uint32_t in1_cb, uint32_t out_cb, uint32_t num_tiles) {
     // out_cb = logsigmoid(in0_cb - in1_cb)
-
-    // Implemented as softplus. logsigmoid(x) = -softplus(-x)
-
+    // Implemented as softplus for numerical stability. logsigmoid(x) = -softplus(-x)
     cb_wait_front(in0_cb, num_tiles);
     cb_wait_front(in1_cb, num_tiles);
     cb_reserve_back(out_cb, num_tiles);
     sub_tiles_init(in0_cb, in1_cb);
+    softplus_tile_init();
+    constexpr uint32_t const_1_fp32 = 0x3F800000;
+    constexpr uint32_t const_20_fp32 = 0x41A00000;
 
     for (uint32_t i = 0; i < num_tiles; i++) {
         acquire_dst();
-        // Remove negate by swapping inputs
+        // Negate input to softplus by swapping inputs to sub
         sub_tiles(in1_cb, in0_cb, i, i, 0);
-        softplus_tile_init();
-        softplus_tile(0, 0x3F800000, 0x3F800000, 0x41A00000);  // beta, beta_reciprocal, threshold
-        negative_tile_init();
+        // softplus_tile(0, 0x3F800000, 0x3F800000, 0x41A00000);  // beta, beta_reciprocal, threshold
+        // MATH((llk_math_eltwise_unary_sfpu_softplus<APPROX>(
+        //     0,
+        //     const_1_fp32 /*beta*/,
+        //     const_1_fp32 /*beta_reciprocal*/,
+        //     const_20_fp32 /*threshold*/,
+        //     (int)VectorMode::C)));
+
+        MATH((softplus_tile_first_column(0, const_1_fp32, const_1_fp32, const_20_fp32)));
+        // Negate the output of softplus
         negative_tile(0);
         pack_tile(0, out_cb);
         release_dst();
     }
     cb_push_back(out_cb, num_tiles);
 }
+
 void sub_block(uint32_t in0_cb, uint32_t in1_cb, uint32_t out_cb, uint32_t num_tiles) {
     // out_cb = in0_cb - in1_cb
 
