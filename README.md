@@ -38,6 +38,7 @@ kernels/
   dataflow/generate_*.hpp          # Scalar tile helpers pulled from TTNN
 core_communicate.md                # Notes on the peer-to-peer protocol (for deeper dives)
 debug/*.py                         # Simple log parsing utilities for captured kernel traces
+profile/*.py                       # Light weight profiler
 ```
 
 ## Building the Example
@@ -80,20 +81,20 @@ After modifying any of these knobs, rebuild and re-run the binary; the host veri
 
 ## AI Infra Communication Scaffold
 
-A lightweight modeling script is provided at `debug/ai_infra_roofline.py`.
+A lightweight modeling script is provided at `profile/ai_infra_roofline.py`.
 
 It reads key knobs from `main.cpp` and `simple_ring_sdpa.cpp`, then reports a
 known-facts communication baseline using:
 - inter-core latency per write (`9 cycles`)
 - max payload per write (`32 bytes`)
-
+- flops (due to the lack of hardware, we only have peak flops for each computation unit)
 No unknown hardware assumptions (peak FLOPs, memory bandwidth, clock frequency)
 are filled in this script.
 
 Example:
 
 ```bash
-python3 debug/ai_infra_roofline.py \
+python3 profile/ai_infra_roofline.py \
    --repo-root . \
    --ring-size 8 \
    --num-heads 8 \
@@ -105,8 +106,8 @@ python3 debug/ai_infra_roofline.py \
 ```
 
 Output files:
-- `debug/roofline_report.md` (AI-infra style narrative report)
-- `debug/roofline_metrics.json` (structured metrics + resume bullets)
-- `debug/roofline_plot.svg` (brief communication roofline plot)
+- `profile/roofline_report.md` (AI-infra style narrative report)
+- `profile/roofline_metrics.json` (structured metrics + resume bullets)
+- `profile/roofline_plot.svg` (brief communication roofline plot)
 
 Happy hacking!
