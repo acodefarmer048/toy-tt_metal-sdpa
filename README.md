@@ -78,4 +78,35 @@ After modifying any of these knobs, rebuild and re-run the binary; the host veri
 - If kernels hang, verify that the ring semaphore logic still matches the device grid you selected—`RunRingSDPA` assumes each row contains exactly `ring_size` cores and that all rings share the same sequence chunk size.
 - Large tolerances or `TEST FAILED` usually indicate either a tilization mismatch (check `tilize_heads` / `untilize_heads`) or an imbalance between `seq_chunk_tiles`, `head_dim_tiles`, and the circular buffer sizes declared in `simple_ring_sdpa.cpp`.
 
+## AI Infra Communication Scaffold
+
+A lightweight modeling script is provided at `debug/ai_infra_roofline.py`.
+
+It reads key knobs from `main.cpp` and `simple_ring_sdpa.cpp`, then reports a
+known-facts communication baseline using:
+- inter-core latency per write (`9 cycles`)
+- max payload per write (`32 bytes`)
+
+No unknown hardware assumptions (peak FLOPs, memory bandwidth, clock frequency)
+are filled in this script.
+
+Example:
+
+```bash
+python3 debug/ai_infra_roofline.py \
+   --repo-root . \
+   --ring-size 8 \
+   --num-heads 8 \
+   --intercore-latency-cycles 9 \
+   --intercore-write-bytes 32 \
+   --cycle-ns 1 \
+   --flops-tier 0 \
+   --print
+```
+
+Output files:
+- `debug/roofline_report.md` (AI-infra style narrative report)
+- `debug/roofline_metrics.json` (structured metrics + resume bullets)
+- `debug/roofline_plot.svg` (brief communication roofline plot)
+
 Happy hacking!

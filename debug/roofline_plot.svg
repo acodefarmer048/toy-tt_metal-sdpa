@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+<rect x="0" y="0" width="100%" height="100%" fill="white"/>
+<text x="80" y="28" font-size="18" font-family="sans-serif">Brief Roofline (Comm BW + Compute Ceiling)</text>
+<line x1="80" y1="450.00" x2="860" y2="450.00" stroke="#e6e6e6"/>
+<text x="70" y="454.00" text-anchor="end" font-size="11" font-family="sans-serif">0.000</text>
+<line x1="80" y1="370.00" x2="860" y2="370.00" stroke="#e6e6e6"/>
+<text x="70" y="374.00" text-anchor="end" font-size="11" font-family="sans-serif">0.669</text>
+<line x1="80" y1="290.00" x2="860" y2="290.00" stroke="#e6e6e6"/>
+<text x="70" y="294.00" text-anchor="end" font-size="11" font-family="sans-serif">1.338</text>
+<line x1="80" y1="210.00" x2="860" y2="210.00" stroke="#e6e6e6"/>
+<text x="70" y="214.00" text-anchor="end" font-size="11" font-family="sans-serif">2.008</text>
+<line x1="80" y1="130.00" x2="860" y2="130.00" stroke="#e6e6e6"/>
+<text x="70" y="134.00" text-anchor="end" font-size="11" font-family="sans-serif">2.677</text>
+<line x1="80" y1="50.00" x2="860" y2="50.00" stroke="#e6e6e6"/>
+<text x="70" y="54.00" text-anchor="end" font-size="11" font-family="sans-serif">3.346</text>
+<line x1="80.00" y1="50" x2="80.00" y2="450" stroke="#f0f0f0"/>
+<text x="80.00" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">2.369</text>
+<line x1="143.35" y1="50" x2="143.35" y2="450" stroke="#f0f0f0"/>
+<text x="143.35" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">4.737</text>
+<line x1="206.70" y1="50" x2="206.70" y2="450" stroke="#f0f0f0"/>
+<text x="206.70" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">9.475</text>
+<line x1="270.06" y1="50" x2="270.06" y2="450" stroke="#f0f0f0"/>
+<text x="270.06" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">18.95</text>
+<line x1="333.41" y1="50" x2="333.41" y2="450" stroke="#f0f0f0"/>
+<text x="333.41" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">37.9</text>
+<line x1="396.76" y1="50" x2="396.76" y2="450" stroke="#f0f0f0"/>
+<text x="396.76" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">75.8</text>
+<line x1="460.11" y1="50" x2="460.11" y2="450" stroke="#f0f0f0"/>
+<text x="460.11" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">151.6</text>
+<line x1="523.47" y1="50" x2="523.47" y2="450" stroke="#f0f0f0"/>
+<text x="523.47" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">303.2</text>
+<line x1="586.82" y1="50" x2="586.82" y2="450" stroke="#f0f0f0"/>
+<text x="586.82" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">606.4</text>
+<line x1="650.17" y1="50" x2="650.17" y2="450" stroke="#f0f0f0"/>
+<text x="650.17" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">1213</text>
+<line x1="713.52" y1="50" x2="713.52" y2="450" stroke="#f0f0f0"/>
+<text x="713.52" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">2426</text>
+<line x1="776.88" y1="50" x2="776.88" y2="450" stroke="#f0f0f0"/>
+<text x="776.88" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">4851</text>
+<line x1="840.23" y1="50" x2="840.23" y2="450" stroke="#f0f0f0"/>
+<text x="840.23" y="468" text-anchor="middle" font-size="11" font-family="sans-serif">9702</text>
+<line x1="80" y1="450" x2="860" y2="450" stroke="black"/>
+<line x1="80" y1="50" x2="80" y2="450" stroke="black"/>
+<polyline points="80.00,448.99 89.87,448.88 99.75,448.75 109.62,448.61 119.49,448.45 129.37,448.27 139.24,448.07 149.11,447.86 158.99,447.61 168.86,447.34 178.73,447.03 188.61,446.70 198.48,446.32 208.35,445.90 218.23,445.43 228.10,444.91 237.97,444.33 247.85,443.68 257.72,442.96 267.59,442.16 277.47,441.26 287.34,440.27 297.22,439.16 307.09,437.92 316.96,436.54 326.84,435.01 336.71,433.30 346.58,431.39 356.46,429.27 366.33,426.91 376.20,424.27 386.08,421.34 395.95,418.07 405.82,414.42 415.70,410.36 425.57,405.84 435.44,400.81 445.32,395.19 455.19,388.94 465.06,381.98 474.94,374.22 484.81,365.57 494.68,355.94 504.56,345.21 514.43,333.26 524.30,319.94 534.18,305.10 544.05,288.57 553.92,270.16 563.80,249.64 573.67,226.78 583.54,201.32 593.42,172.95 603.29,141.35 613.16,130.00 623.04,130.00 632.91,130.00 642.78,130.00 652.66,130.00 662.53,130.00 672.41,130.00 682.28,130.00 692.15,130.00 702.03,130.00 711.90,130.00 721.77,130.00 731.65,130.00 741.52,130.00 751.39,130.00 761.27,130.00 771.14,130.00 781.01,130.00 790.89,130.00 800.76,130.00 810.63,130.00 820.51,130.00 830.38,130.00 840.25,130.00 850.13,130.00 860.00,130.00" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<line x1="80" y1="130.00" x2="860" y2="130.00" stroke="#d62728" stroke-dasharray="6,4" stroke-width="1.5"/>
+<circle cx="333.41" cy="433.89" r="5" fill="#2ca02c"/>
+<text x="470.00" y="502" text-anchor="middle" font-size="13" font-family="sans-serif">Arithmetic intensity (FLOP/byte, log2)</text>
+<text x="18" y="250.00" transform="rotate(-90 18,250.00)" text-anchor="middle" font-size="13" font-family="sans-serif">Throughput ceiling (TFLOP/s)</text>
+<rect x="575" y="60" width="270" height="64" fill="white" stroke="#cccccc"/>
+<line x1="585" y1="76" x2="620" y2="76" stroke="#1f77b4" stroke-width="2"/>
+<text x="627" y="80" font-size="11" font-family="sans-serif">Roofline min(BW*AI, Pcompute)</text>
+<line x1="585" y1="94" x2="620" y2="94" stroke="#d62728" stroke-dasharray="6,4" stroke-width="1.5"/>
+<text x="627" y="98" font-size="11" font-family="sans-serif">Compute ceiling</text>
+<circle cx="602" cy="112" r="4" fill="#2ca02c"/>
+<text x="627" y="116" font-size="11" font-family="sans-serif">Current workload point</text>
+<text x="80" y="480" font-size="11" font-family="sans-serif">BW=3.5556 GB/s, Pcompute=2.6768 TFLOP/s, AI_current=37.899554, P_current=0.134754 TFLOP/s</text>
+</svg>

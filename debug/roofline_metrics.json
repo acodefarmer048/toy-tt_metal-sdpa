@@ -1,0 +1,72 @@
+{
+  "config": {
+    "tile_size": 32,
+    "datum_size_bytes": 2,
+    "batch": 1,
+    "num_heads": 8,
+    "ring_size": 8,
+    "seq_chunk_tiles": 1,
+    "head_dim_tiles": 1
+  },
+  "known_constants": {
+    "intercore_latency_cycles": 9,
+    "intercore_write_bytes": 32,
+    "cycle_ns": 1.0,
+    "flops_tier": 0
+  },
+  "analysis": {
+    "block_tiles": 1,
+    "block_bytes": 2048,
+    "steps_with_ring_transfer": 7,
+    "writes_per_step": 128,
+    "comm_bytes_per_step": 4096,
+    "comm_cycles_per_step": 1152,
+    "comm_time_ns_per_step": 1152.0,
+    "total_comm_bytes_per_core": 28672,
+    "total_comm_cycles_per_core": 8064,
+    "total_comm_time_ns_per_core": 8064.0,
+    "asymptotic_bw_gbps": 3.5555555555555554,
+    "flops_per_core": 1086656.0,
+    "arithmetic_intensity_flop_per_byte": 37.89955357142857,
+    "compute_time_ns_per_core": 405.95714285714286,
+    "effective_compute_tflops": 2.67677516979273,
+    "selected_flops_tier": 0,
+    "op_flops_breakdown": {
+      "mvmul_bsrcbrow_false": 524288.0,
+      "dotpv": 524288.0,
+      "gapool": 7936.0,
+      "gmpool": 7936.0,
+      "mvmul_bsrcbrow_true": 256.0,
+      "elwmul": 7392.0,
+      "elwadd_sub_adddst_true": 7168.0,
+      "elwadd_sub_adddst_false": 7392.0
+    },
+    "op_peak_tflops_selected": {
+      "mvmul_bsrcbrow_false": 4.096,
+      "dotpv": 4.096,
+      "gapool": 2.048,
+      "mvmul_bsrcbrow_true": 0.56,
+      "elwmul": 0.256,
+      "gmpool": 0.256,
+      "elwadd_sub_adddst_true": 0.256,
+      "elwadd_sub_adddst_false": 0.128
+    }
+  },
+  "plot": {
+    "path": "debug/roofline_plot.svg",
+    "status": "ok"
+  },
+  "resume": {
+    "infra_bullet_1": "Developed a lightweight AI infra roofline scaffold for distributed Ring-SDPA, combining communication constants with measured operator FLOPS limits.",
+    "infra_bullet_2": "Quantified inter-core transfer cost with 9 cycles/write and 32B granularity, and estimated an op-mix compute ceiling of 2.677 TFLOP/s at FLOPS tier 0.",
+    "infra_bullet_3": "Converted low-level kernel debugging into a data-backed bottleneck framework (bandwidth roof vs compute roof) for optimization planning and architecture discussion.",
+    "context": "batch=1, heads=8, ring_size=8, seq_chunk_tiles=1, head_dim_tiles=1"
+  },
+  "inferred_from_cpp": {
+    "tile_size": 32,
+    "seq_chunk_tiles": 1,
+    "head_dim_tiles": 1,
+    "batch": 1,
+    "datum_size_bytes": 2
+  }
+}
