@@ -39,6 +39,7 @@ kernels/
 core_communicate.md                # Notes on the peer-to-peer protocol (for deeper dives)
 debug/*.py                         # Simple log parsing utilities for captured kernel traces
 profile/*.py                       # Light weight profiler
+scripts/*.sh                       # Miscellaneous scripts, like scripts to simulate
 ```
 
 ## Building the Example
@@ -64,6 +65,11 @@ cmake --build build -j
 
 During execution the program prints the device grid, problem dimensions, and validation statistics. A `TEST PASSED` message indicates the on-device output matched the CPU reference within the default BF16 tolerances (`abs_tol = rel_tol = 0.02`).
 
+## Simulating
+```
+TT_METAL_SLOW_DISPATCH_MODE=1 ./build/programming_examples/sdpa 
+```
+Till now, some features are not yet implemented in ttsim, refer to the issues of ttsim github repo
 ## Customizing the Workload
 
 - **Sequence length / ring size**: Change `seq_chunk_tiles` or run on a wider device grid to increase the number of tiles streamed per hop.
